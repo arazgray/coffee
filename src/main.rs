@@ -21,7 +21,9 @@ use crossfade::Crossfade;
 use engine::{Engine, Event, PointerEvent};
 use gpu::{DecodeChoice, Devices};
 use photos::{PanBounds, PhotoFolder};
-use state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, image_path, is_stream};
+use state::{
+    Hdr, Kind, Media, PhotoZoom, RenderMode, SpeedStep, display_name, image_path, is_stream,
+};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 use std::{
@@ -772,16 +774,19 @@ impl App {
         }
     }
 
-    fn set_playback_speed(&mut self, speed: f64) -> Result<(), String> {
+    fn step_playback_speed(&mut self, step: SpeedStep) -> Result<(), String> {
         if !matches!(self.media.kind, Kind::Video | Kind::Music) || self.live.is_some() {
             return Ok(());
         }
+        let was_reverse = self.mpv.get("play-direction").as_str() == Some("backward");
+        let current = self.mpv.get("speed").as_f64().unwrap_or(1.0);
+        let current = if was_reverse { -current } else { current };
+        let Some(speed) = step.next(current, self.timing.seekable) else {
+            return Ok(());
+        };
         let reverse = speed < 0.0;
-        if reverse && !self.timing.seekable {
-            return Err("Reverse playback needs a seekable file.".into());
-        }
         self.playback_health.interrupt();
-        if reverse && !self.timing.reverse && self.media.kind == Kind::Video {
+        if reverse && !was_reverse && self.media.kind == Kind::Video {
             // mpv has to retain whole decoded GOPs in reverse. Keeping those
             // frames in hardware surfaces can exhaust the GPU decoder pool.
             let old = match self.mpv.get("hwdec") {
@@ -797,7 +802,7 @@ impl App {
             self.mpv.set("file-local-options/hwdec", "no")?;
             self.reverse_hwdec = Some(old);
         }
-        if reverse != self.timing.reverse {
+        if reverse != was_reverse {
             self.mpv.set(
                 "file-local-options/play-direction",
                 if reverse { "backward" } else { "forward" },
@@ -809,11 +814,7 @@ impl App {
         }
         self.mpv
             .set("file-local-options/speed", &speed.abs().to_string())?;
-        if reverse
-            && !self.timing.reverse
-            && self.timing.position <= 0.1
-            && self.timing.duration > 0.25
-        {
+        if reverse && !was_reverse && self.timing.position <= 0.1 && self.timing.duration > 0.25 {
             self.mpv.command(&[
                 "seek",
                 &(self.timing.duration - 0.1).to_string(),
@@ -1514,7 +1515,7 @@ impl App {
             }
             Action::Audio(id) => self.mpv.set("aid", &id.to_string()),
             Action::Subtitles(id) => self.subtitles.select(&self.mpv, id),
-            Action::Speed(speed) => self.set_playback_speed(speed),
+            Action::Speed(step) => self.step_playback_speed(step),
             Action::Quality(bitrate) => {
                 self.quality = bitrate;
                 self.mpv.set("hls-bitrate", bitrate).and_then(|_| {
@@ -1926,6 +1927,7 @@ impl App {
                 || self.controls.active(Instant::now())
                 || self.dragging_volume()
                 || self.photo_drag.is_some()
+                || self.seek_preview.hovering()
             {
                 Duration::from_millis(16)
             } else {
@@ -2046,16 +2048,18 @@ impl App {
                         .and_then(|mouse| ui::seek_hover((w, h), mouse))
                 })
                 .flatten();
-            let request = hover
-                .filter(|_| !matches!(prepare_status, Some(prepare::Status::Running(..))))
-                .map(|hover| {
-                    (
-                        (hover.fraction * self.timing.duration)
-                            .min((self.timing.duration - 0.1).max(0.0)),
-                        hover.image_bounds,
-                    )
-                });
-            let has_image = self.seek_preview.update(&self.mpv, request, now);
+            let preview_allowed = !matches!(prepare_status, Some(prepare::Status::Running(..)))
+                && self.timing.seekable;
+            let request = hover.map(|hover| {
+                (
+                    (hover.fraction * self.timing.duration)
+                        .min((self.timing.duration - 0.1).max(0.0)),
+                    hover.image_bounds,
+                )
+            });
+            let has_image =
+                self.seek_preview
+                    .update(&self.mpv, request, self.timing.duration, preview_allowed);
             let frame = ui::draw(View {
                 w,
                 h,

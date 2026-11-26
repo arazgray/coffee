@@ -3,7 +3,7 @@ use crate::{
     gpu::{DecodeChoice, DecoderGpu},
     prepare::{Method, Status},
     scale::{PERCENT, pixels},
-    state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, is_stream, time},
+    state::{Hdr, Kind, Media, PhotoZoom, RenderMode, SpeedStep, display_name, is_stream, time},
     subtitles::{CaptionStyle, Direction, ENCODINGS, Encoding},
 };
 use std::fmt::Write;
@@ -83,7 +83,7 @@ pub enum Action {
     SubtitleDirection(Direction),
     SubtitleEncoding(Encoding),
     SubtitleFont(Option<usize>),
-    Speed(f64),
+    Speed(SpeedStep),
     Quality(&'static str),
     Hdr(Hdr),
     Decode(DecodeChoice),
@@ -1386,7 +1386,7 @@ fn bottom(f: &mut Frame, v: View<'_>) {
             Action::Menu(Menu::Playlist),
         ),
         (
-            "Playback",
+            "Settings",
             Some(Menu::Playback),
             Action::Menu(Menu::Playback),
         ),
@@ -1400,20 +1400,9 @@ fn bottom(f: &mut Frame, v: View<'_>) {
         if image && !matches!(icon, "Expand" | "Minimize" | "SquarePlay" | "ListVideo") {
             continue;
         }
-        let wide = if icon == "Playback" { 82 } else { 34 };
-        right -= wide;
-        let r = Rect::new(right, right_row, wide - 2, 32);
-        if icon == "Playback" {
-            f.button(
-                r,
-                "Playback",
-                v,
-                (v.menu == Some(Menu::Playback), true),
-                action,
-            );
-        } else {
-            f.icon_button(r, icon, v, menu.is_some() && v.menu == menu, true, action);
-        }
+        right -= 34;
+        let r = Rect::new(right, right_row, 32, 32);
+        f.icon_button(r, icon, v, menu.is_some() && v.menu == menu, true, action);
     }
     if image {
         let (x, y) = if v.w < COMPACT_PHOTO_WIDTH {
@@ -1461,7 +1450,7 @@ struct Row {
     action: Option<Action>,
     active: bool,
     remove: Option<usize>,
-    speeds: Option<&'static [(f64, &'static str)]>,
+    speed_stepper: bool,
 }
 fn row(label: impl Into<String>, action: Action) -> Row {
     Row {
@@ -1469,7 +1458,7 @@ fn row(label: impl Into<String>, action: Action) -> Row {
         action: Some(action),
         active: false,
         remove: None,
-        speeds: None,
+        speed_stepper: false,
     }
 }
 fn note(label: impl Into<String>) -> Row {
@@ -1478,7 +1467,7 @@ fn note(label: impl Into<String>) -> Row {
         action: None,
         active: false,
         remove: None,
-        speeds: None,
+        speed_stepper: false,
     }
 }
 fn selected(label: impl Into<String>, action: Action, active: bool) -> Row {
@@ -1487,33 +1476,19 @@ fn selected(label: impl Into<String>, action: Action, active: bool) -> Row {
         action: Some(action),
         active,
         remove: None,
-        speeds: None,
+        speed_stepper: false,
     }
 }
 
-const REVERSE_SPEEDS: &[(f64, &str)] = &[
-    (-16.0, "−16×"),
-    (-8.0, "−8×"),
-    (-4.0, "−4×"),
-    (-2.0, "−2×"),
-    (-1.0, "−1×"),
-    (-0.5, "−0.5×"),
-    (-0.25, "−0.25×"),
-];
-const FORWARD_SPEEDS: &[(f64, &str)] = &[
-    (0.25, "+0.25×"),
-    (0.5, "+0.5×"),
-    (0.75, "+0.75×"),
-    (1.0, "+1×"),
-    (1.25, "+1.25×"),
-    (1.5, "+1.5×"),
-    (2.0, "+2×"),
-    (4.0, "+4×"),
-    (8.0, "+8×"),
-    (16.0, "+16×"),
-];
+fn speed_label(speed: f64) -> String {
+    let magnitude = format!("{:.2}", speed.abs());
+    let display = magnitude.strip_suffix('0').unwrap_or(&magnitude);
+    format!("{}{display}×", if speed < 0.0 { "−" } else { "" })
+}
 
-fn speed_buttons(f: &mut Frame, v: View<'_>, r: Rect, choices: &[(f64, &str)]) {
+fn speed_buttons(f: &mut Frame, v: View<'_>, row: Rect) {
+    let width = row.w.min(pixels(158));
+    let r = Rect::new(row.x + (row.w - width) / 2, row.y, width, row.h);
     f.rect(r, 6, LINE, 0);
     f.rect(
         Rect::new(r.x + 1, r.y + 1, r.w - 2, r.h - 2),
@@ -1521,39 +1496,35 @@ fn speed_buttons(f: &mut Frame, v: View<'_>, r: Rect, choices: &[(f64, &str)]) {
         "211A16",
         0,
     );
-    let count = choices.len() as i32;
-    for (i, &(speed, label)) in choices.iter().enumerate() {
-        let start = (r.w - 2) * i as i32 / count;
-        let end = (r.w - 2) * (i as i32 + 1) / count;
-        let part = Rect::new(r.x + 1 + start, r.y + 1, end - start, r.h - 2);
-        let enabled = v.seekable || speed > 0.0;
-        let active = (speed - v.speed).abs() < 0.001;
-        if active || (enabled && part.contains(v.mouse)) {
-            f.rect(part, 4, if active { "3D2A1E" } else { "31251D" }, 0);
-        }
-        if i > 0 {
-            f.rect(Rect::new(part.x, r.y + 5, 1, r.h - 10), 0, LINE, 0);
-        }
-        let color = if active {
-            ACCENT
-        } else if enabled {
-            TEXT
-        } else {
-            MUTED
-        };
-        f.text(
-            part.x + part.w / 2,
-            r.y + r.h / 2,
-            pixels(11),
-            5,
-            color,
-            active,
-            label,
+    let side = pixels(38).min(r.w / 4);
+    for (step, icon, x, divider) in [
+        (SpeedStep::Decrease, "Minus", r.x + 1, r.x + 1 + side),
+        (
+            SpeedStep::Increase,
+            "Plus",
+            r.x + r.w - side - 1,
+            r.x + r.w - side - 2,
+        ),
+    ] {
+        f.icon_button(
+            Rect::new(x, r.y + 1, side, r.h - 2),
+            icon,
+            v,
+            false,
+            step.next(v.speed, v.seekable).is_some(),
+            Action::Speed(step),
         );
-        if enabled {
-            f.hit(part, Action::Speed(speed));
-        }
+        f.rect(Rect::new(divider, r.y + 5, 1, r.h - 10), 0, LINE, 0);
     }
+    f.text(
+        r.x + r.w / 2,
+        r.y + r.h / 2,
+        pixels(12),
+        5,
+        ACCENT,
+        true,
+        &speed_label(v.speed),
+    );
 }
 
 fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
@@ -1703,17 +1674,14 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
         Menu::Playback => {
             if matches!(v.media.kind, Kind::Video | Kind::Music) {
                 rows.push(note(if v.seekable {
-                    "Speed · − reverse / + forward"
+                    "Speed · reverse to −64× / forward to +64×"
                 } else {
                     "Speed · reverse needs a seekable file"
                 }));
-                let columns = ((width - pixels(14)) / pixels(44)).clamp(2, 10) as usize;
-                for speeds in [REVERSE_SPEEDS, FORWARD_SPEEDS] {
-                    rows.extend(speeds.chunks(columns).map(|group| Row {
-                        speeds: Some(group),
-                        ..note("")
-                    }));
-                }
+                rows.push(Row {
+                    speed_stepper: true,
+                    ..note("")
+                });
             }
             if v.media.kind != Kind::Music {
                 rows.extend([
@@ -1969,8 +1937,8 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
     for (i, item) in rows.into_iter().skip(scroll).take(end - scroll).enumerate() {
         let row_y = y + header - pixels(4) + i as i32 * row_height;
         let r = Rect::new(x + pixels(5), row_y, width - pixels(10), pixels(26));
-        if let Some(speeds) = item.speeds {
-            speed_buttons(f, v, Rect::new(r.x + 3, r.y, r.w - 6, r.h), speeds);
+        if item.speed_stepper {
+            speed_buttons(f, v, r);
             continue;
         }
         if item.active || (r.contains(v.mouse) && item.action.is_some()) {
@@ -2437,6 +2405,9 @@ mod tests {
             ..Media::default()
         };
         let mut view = video(&media);
+        let toolbar = draw(view);
+        assert!(toolbar.osd().contains(icon_path("Settings", 19)));
+        assert!(!toolbar.osd().lines().any(|line| line.ends_with("Playback")));
         view.menu = Some(Menu::Playback);
         let frame = draw(view);
         let (bounds, _) = frame
@@ -2479,20 +2450,25 @@ mod tests {
             );
         }
         for action in [
-            Action::Speed(-16.0),
-            Action::Speed(16.0),
+            Action::Speed(SpeedStep::Decrease),
+            Action::Speed(SpeedStep::Increase),
             Action::Hdr(Hdr::Prefer),
         ] {
             assert!(frame.hits.iter().any(|(_, a)| *a == action));
         }
         view.menu = Some(Menu::Playback);
+        view.speed = 0.25;
         view.seekable = false;
         assert!(
             !draw(view)
                 .hits
                 .iter()
-                .any(|(_, a)| matches!(a, Action::Speed(speed) if *speed < 0.0))
+                .any(|(_, a)| *a == Action::Speed(SpeedStep::Decrease))
         );
+        assert!(frame.osd().lines().any(|line| line.ends_with("1.0×")));
+        assert_eq!(speed_label(1.25), "1.25×");
+        assert_eq!(speed_label(1.5), "1.5×");
+        assert_eq!(speed_label(-64.0), "−64.0×");
     }
 
     #[test]

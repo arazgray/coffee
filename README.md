@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 1.3** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.3/SHA256SUMS.txt)
+**Coffee 1.4** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.4/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-media-player-1.3.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-media-player-1.3.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-media-player-1.4.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-media-player-1.4.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-windows-x86_64.zip) |
 
 ## Install
 
@@ -47,8 +47,8 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 
 - Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
 - **Repeat One**, just before the volume button, loops the current video or song without advancing the queue. Click it again to turn it off.
-- **Playback** contains speed, HDR, decoder, and rendering settings. The speed buttons range from **−16×** (reverse) to **+16×** (forward); **+1×** is normal speed. Reverse is available for seekable media and uses software decoding for video. It may be slower on some formats, and embedded subtitles may not show in reverse.
-- Hover over the seek bar to see the timestamp and a thumbnail. Hovering does not seek. Thumbnails use FFmpeg for local videos; if a frame cannot be decoded or the video is a stream, the timestamp still appears.
+- The **gear icon** opens playback settings, including HDR, decoder, and rendering. Use **−** and **+** around the current speed to step down or up from **1.0×**. The range is **−64×** (reverse) to **64×** (forward). Reverse is available for seekable media and uses software decoding for video. Some formats play more slowly in reverse, and embedded subtitles may not show.
+- Hover over the seek bar to see the timestamp and a thumbnail. Coffee builds a small thumbnail index in the background when you open a local video, so previews update as you move. An uncached area may take a moment on first hover. Hovering does not seek. Thumbnails use FFmpeg; seekable streams or unavailable frames show the timestamp without a thumbnail.
 - Open a photo to browse nearby images with **Previous** and **Next**. Photos switch without a fade or hiding the controls. Coffee preloads five photos on each side and their Live clips in the background, prioritizing the current Live clip. The RAM cache is bounded at 256 MiB (128 MiB per file); uncached files still open normally.
 - A same-named `.MOV` companion adds a **Live** badge. Click it to play the clip and automatically return to the still without adding a playlist item. Live Photo transitions blend directly into the next frame over 150 ms.
 - **Slideshow**, beside **Live** in the playback area, opens a dropdown with optional music and a **Play** button. Play enters fullscreen and crossfades to the next photo every five seconds, looping through the folder. Move the mouse to reveal the hidden controls, or press **Esc** to stop the slideshow and its music.

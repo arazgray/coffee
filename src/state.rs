@@ -53,6 +53,34 @@ impl PhotoZoom {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeedStep {
+    Decrease,
+    Increase,
+}
+
+impl SpeedStep {
+    pub fn next(self, speed: f64, seekable: bool) -> Option<f64> {
+        // Quarter steps around normal speed, then larger steps so the
+        // extremes are reachable without hundreds of clicks.
+        const STOPS: &[f64] = &[
+            0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0,
+            12.0, 16.0, 24.0, 32.0, 48.0, 64.0,
+        ];
+        let speed = if speed.is_finite() { speed } else { 1.0 };
+        let mut choices = STOPS
+            .iter()
+            .filter(|_| seekable)
+            .rev()
+            .map(|&rate| -rate)
+            .chain(STOPS.iter().copied());
+        match self {
+            Self::Increase => choices.find(|&rate| rate > speed + 0.0001),
+            Self::Decrease => choices.rfind(|&rate| rate < speed - 0.0001),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenderMode {
     #[default]
@@ -393,6 +421,21 @@ pub fn time(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speed_stepper_uses_quarter_steps_near_normal_and_is_bounded() {
+        use SpeedStep::*;
+        assert_eq!(Increase.next(1.0, true), Some(1.25));
+        assert_eq!(Increase.next(1.25, true), Some(1.5));
+        assert_eq!(Decrease.next(1.0, true), Some(0.75));
+        assert_eq!(Decrease.next(0.25, true), Some(-0.25));
+        assert_eq!(Increase.next(-0.25, true), Some(0.25));
+        assert_eq!(Decrease.next(0.25, false), None);
+        assert_eq!(Increase.next(48.0, true), Some(64.0));
+        assert_eq!(Decrease.next(-48.0, true), Some(-64.0));
+        assert_eq!(Increase.next(64.0, true), None);
+        assert_eq!(Decrease.next(-64.0, true), None);
+    }
 
     #[test]
     fn rendering_profile_is_fast_by_default_only_for_high_rate_4k() {
