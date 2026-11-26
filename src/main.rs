@@ -2,6 +2,7 @@
 
 mod crossfade;
 mod engine;
+mod fonts;
 mod gpu;
 mod heif_source;
 mod image_source;
@@ -54,6 +55,7 @@ enum Input {
     #[cfg(unix)]
     Launch(Vec<String>),
     Picked(Picker, Option<String>),
+    FontsLoaded(fonts::Catalog),
 }
 
 struct Runtime {
@@ -427,9 +429,13 @@ struct App {
     live: Option<LivePreview>,
     stream: Option<StreamInput>,
     subtitles: subtitles::Subtitles,
+    fonts: fonts::Catalog,
+    font_query: String,
+    font_input: bool,
     prepare_target: Option<prepare::Target>,
     prepare_job: Option<prepare::Job>,
     prepared_track: Option<(i64, i64)>,
+    playback_health: prepare::PlaybackHealth,
     queue_snapshot: QueueSnapshot,
     playlist_changed: Option<Instant>,
 }
@@ -664,6 +670,96 @@ impl App {
         self.scroll = 0;
         if self.menu == Some(Menu::Playlist) {
             self.scroll = self.media.index.unwrap_or(0).saturating_sub(3);
+        }
+        if self.menu == Some(Menu::SubtitleFont) {
+            self.font_query.clear();
+            if matches!(
+                self.fonts,
+                fonts::Catalog::Unloaded | fonts::Catalog::Failed
+            ) {
+                let tx = self.tx.clone();
+                self.fonts = fonts::Catalog::Loading;
+                thread::spawn(move || {
+                    let _ = tx.send(Input::FontsLoaded(fonts::discover()));
+                });
+            }
+        }
+    }
+
+    fn sync_font_input(&mut self) {
+        let wanted = self.menu == Some(Menu::SubtitleFont) && self.stream.is_none();
+        if wanted != self.font_input {
+            self.font_input = wanted;
+            let args: &[&str] = if wanted {
+                &["enable-section", "coffee-subtitle-font", "exclusive"]
+            } else {
+                &["disable-section", "coffee-subtitle-font"]
+            };
+            let _ = self.mpv.command(args);
+        }
+    }
+
+    fn type_font_query(&mut self, text: &str) {
+        let room = 96usize.saturating_sub(self.font_query.chars().count());
+        self.font_query
+            .extend(text.chars().filter(|c| !c.is_control()).take(room));
+        self.scroll = 0;
+        self.hovered = Instant::now();
+    }
+
+    fn font_key(&mut self, key: &str) {
+        if self.menu != Some(Menu::SubtitleFont) {
+            return;
+        }
+        match key {
+            "font-backspace" => {
+                self.font_query.pop();
+            }
+            "font-clear" => self.font_query.clear(),
+            "font-space" => self.type_font_query(" "),
+            "font-paste" => {
+                let paste = self.mpv.get("clipboard/text");
+                if let Some(text) = paste.as_str() {
+                    self.type_font_query(text);
+                }
+            }
+            _ => return,
+        }
+        self.scroll = 0;
+    }
+
+    fn sample_playback(&mut self, now: Instant) {
+        if self.prepare_target.is_none() || self.playback_health.detected() {
+            return;
+        }
+        if self.timing.paused
+            || self.timing.buffering
+            || self.timing.position < 0.25
+            || self.timing.duration - self.timing.position < 0.5
+        {
+            self.playback_health.interrupt();
+            return;
+        }
+        if !self.playback_health.due(now) {
+            return;
+        }
+        if self.mpv.get("seeking").as_bool() == Some(true) {
+            self.playback_health.interrupt();
+            return;
+        }
+        let count = |property| self.mpv.get(property).as_u64().unwrap_or_default();
+        let drops = count("frame-drop-count").saturating_add(count("decoder-frame-drop-count"));
+        let fps = self
+            .mpv
+            .get("container-fps")
+            .as_f64()
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .unwrap_or(30.0);
+        self.playback_health
+            .observe(now, self.timing.position, self.timing.speed, fps, drops);
+        if self.playback_health.detected() {
+            // Reveal the offer even when playback controls were hidden.
+            self.hovered = now;
         }
     }
 
@@ -1067,6 +1163,7 @@ impl App {
 
     fn receive(&mut self, input: Input) {
         match input {
+            Input::FontsLoaded(catalog) => self.fonts = catalog,
             #[cfg(unix)]
             Input::Launch(files) => {
                 let _ = self.mpv.set("window-minimized", "no");
@@ -1136,7 +1233,7 @@ impl App {
                     self.stop_slideshow();
                     return;
                 }
-                if self.menu == Some(Menu::SubtitleEncoding) {
+                if matches!(self.menu, Some(Menu::SubtitleEncoding | Menu::SubtitleFont)) {
                     self.menu = Some(Menu::Subtitles);
                     self.scroll = 0;
                     return;
@@ -1254,10 +1351,12 @@ impl App {
                 if self.media.kind == Kind::Empty {
                     return;
                 }
+                self.playback_health.interrupt();
                 self.mpv
                     .command(&["seek", &seconds.to_string(), "relative"])
             }
             Action::Seek(part) => {
+                self.playback_health.interrupt();
                 self.mpv
                     .command(&["seek", &(part * 100.0).to_string(), "absolute-percent"])
             }
@@ -1310,6 +1409,21 @@ impl App {
                 self.menu = Some(Menu::Subtitles);
                 self.scroll = 0;
                 self.subtitles.set_encoding(&self.mpv, encoding)
+            }
+            Action::SubtitleFont(index) => {
+                let font = match index {
+                    None => None,
+                    Some(i) => match &self.fonts {
+                        fonts::Catalog::Ready(names) => {
+                            let Some(family) = names.get(i) else { return };
+                            Some(family.as_str())
+                        }
+                        _ => return,
+                    },
+                };
+                self.menu = Some(Menu::Subtitles);
+                self.scroll = 0;
+                self.subtitles.set_font(&self.mpv, font)
             }
             Action::Audio(id) => self.mpv.set("aid", &id.to_string()),
             Action::Subtitles(id) => self.subtitles.select(&self.mpv, id),
@@ -1570,6 +1684,7 @@ impl App {
             Event::Start(id) => {
                 self.active_file = Some(id);
                 self.prepare_target = None;
+                self.playback_health = prepare::PlaybackHealth::default();
                 self.prepare_job = None;
                 self.prepared_track = None;
                 if self.menu == Some(Menu::Prepare) {
@@ -1653,8 +1768,10 @@ impl App {
             }
             Event::Pointer(event) => self.pointer(event),
             Event::PlaylistChanged => self.playlist_changed = Some(Instant::now()),
-            Event::StreamText(text) => {
-                if let Some(input) = &mut self.stream {
+            Event::TextInput(text) => {
+                if self.menu == Some(Menu::SubtitleFont) && self.stream.is_none() {
+                    self.type_font_query(&text);
+                } else if let Some(input) = &mut self.stream {
                     input.insert(&text);
                 }
             }
@@ -1662,6 +1779,10 @@ impl App {
                 self.pending_click = None;
                 if name.starts_with("stream-") {
                     self.stream_key(&name);
+                    return true;
+                }
+                if name.starts_with("font-") {
+                    self.font_key(&name);
                     return true;
                 }
                 let action = match name.as_str() {
@@ -1726,6 +1847,7 @@ impl App {
                 self.receive(input);
             }
             self.play_dropped_files();
+            self.sync_font_input();
             if self
                 .pending_click
                 .as_ref()
@@ -1798,6 +1920,7 @@ impl App {
                 dark_hwnd = Some(hwnd);
             }
             let now = Instant::now();
+            self.sample_playback(now);
             let show_controls = self.menu.is_some()
                 || self.stream.is_some()
                 || if let Some(slideshow) = &self.slideshow {
@@ -1832,14 +1955,22 @@ impl App {
                         .as_ref()
                         .is_some_and(|folder| folder.live_clip().is_some()),
                 live_playing: self.live.is_some(),
-                prepare: self.prepare_target.as_ref().map(|target| ui::PrepareView {
-                    cached: target.cached,
-                    playing: self.prepared_track.is_some(),
-                    status: prepare_status.as_ref(),
-                }),
+                prepare: self
+                    .prepare_target
+                    .as_ref()
+                    .filter(|_| self.playback_health.detected())
+                    .map(|target| ui::PrepareView {
+                        cached: target.cached,
+                        playing: self.prepared_track.is_some(),
+                        status: prepare_status.as_ref(),
+                    }),
                 caption: caption.as_deref(),
+                caption_style: self.subtitles.style,
                 subtitle_direction: self.subtitles.direction,
                 subtitle_encoding: self.subtitles.encoding,
+                subtitle_font: self.subtitles.font.as_deref(),
+                font_catalog: &self.fonts,
+                font_query: &self.font_query,
                 photo_zoom: self.zoom,
                 slideshow_playing: self.slideshow.is_some(),
                 slideshow_music: self.slideshow_music.as_deref(),
@@ -1998,6 +2129,13 @@ fn entry() -> Result<(), String> {
     let devices = Devices::discover();
     let mpv = Engine::create(Some(&input), false, devices.renderer.as_deref())?;
     mpv.watch_playlist()?;
+    mpv.command(&[
+        "define-section",
+        "coffee-subtitle-font",
+        include_str!("../assets/subtitle-font-input.conf"),
+        "force",
+    ])?;
+    let subtitles = subtitles::Subtitles::new(&mpv)?;
     let decoder = if env::var_os("KAHVE_HWDEC").is_some() {
         DecodeChoice::Auto
     } else {
@@ -2046,10 +2184,14 @@ fn entry() -> Result<(), String> {
         photos: None,
         live: None,
         stream: None,
-        subtitles: subtitles::Subtitles::default(),
+        subtitles,
+        fonts: fonts::Catalog::default(),
+        font_query: String::new(),
+        font_input: false,
         prepare_target: None,
         prepare_job: None,
         prepared_track: None,
+        playback_health: prepare::PlaybackHealth::default(),
         queue_snapshot: QueueSnapshot::default(),
         playlist_changed: None,
     };

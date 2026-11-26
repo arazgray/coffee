@@ -1,9 +1,10 @@
 use crate::{
+    fonts::Catalog,
     gpu::{DecodeChoice, DecoderGpu},
     prepare::{Method, Status},
     scale::{PERCENT, pixels},
     state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, is_stream, time},
-    subtitles::{Direction, ENCODINGS, Encoding},
+    subtitles::{CaptionStyle, Direction, ENCODINGS, Encoding},
 };
 use std::fmt::Write;
 
@@ -28,6 +29,7 @@ pub enum Menu {
     Audio,
     Subtitles,
     SubtitleEncoding,
+    SubtitleFont,
     Settings,
     Decoder,
     Rendering,
@@ -81,6 +83,7 @@ pub enum Action {
     Subtitles(i64),
     SubtitleDirection(Direction),
     SubtitleEncoding(Encoding),
+    SubtitleFont(Option<usize>),
     Speed(&'static str),
     Quality(&'static str),
     Hdr(Hdr),
@@ -427,8 +430,12 @@ pub struct View<'a> {
     pub live_playing: bool,
     pub prepare: Option<PrepareView<'a>>,
     pub caption: Option<&'a str>,
+    pub caption_style: CaptionStyle,
     pub subtitle_direction: Option<Direction>,
     pub subtitle_encoding: Encoding,
+    pub subtitle_font: Option<&'a str>,
+    pub font_catalog: &'a Catalog,
+    pub font_query: &'a str,
     pub photo_zoom: PhotoZoom,
     pub slideshow_playing: bool,
     pub slideshow_music: Option<&'a str>,
@@ -498,11 +505,16 @@ pub fn draw(mut v: View<'_>) -> Frame {
         && let Some(text) = v.caption
     {
         let x = w / 2;
-        let y = (h - (h / 32).max(10) - subtitle_lift(w, v.controls_opacity > 0)).max(h / 4);
-        let size = (h / 19).clamp(16, 56);
+        let scale = f64::from(h) / 720.0;
+        let style = v.caption_style;
+        let y =
+            (h - subtitle_lift(w, v.controls_opacity > 0) - (style.margin * scale).round() as i32)
+                .max(h / 4);
+        let size = style.size * scale;
+        let outline = style.outline * scale;
         let _ = writeln!(
             f.ass,
-            "{{\\an2\\pos({x},{y})\\fe-1\\fnDejaVu Sans\\fs{size}\\bord2\\shad0\\1c&HFFFFFF&\\3c&H000000&}}{text}",
+            "{{\\an2\\pos({x},{y})\\fe-1\\fs{size:.2}\\bord{outline:.2}\\shad0\\1c&HFFFFFF&\\3c&H000000&}}{text}",
         );
     }
     let empty = v.media.kind == Kind::Empty;
@@ -626,20 +638,14 @@ pub fn draw(mut v: View<'_>) -> Frame {
             photo_actions(&mut f, v);
         }
         if let Some(prepare) = v.prepare {
-            let label = match prepare.status {
-                Some(Status::Running(_, p)) => p
-                    .fraction()
-                    .map(|part| format!("Preparing {}%", (part * 100.0).floor().min(99.0) as u8))
-                    .unwrap_or_else(|| "Preparing…".into()),
-                _ if prepare.ready() => "Prepared".into(),
-                _ => "Prepare".into(),
-            };
+            let rect = prepare_anchor(v);
+            let busy = matches!(prepare.status, Some(Status::Running(..)));
             f.labeled_button(
-                prepare_anchor(v),
-                &label,
-                (None, Some("ChevronDown")),
+                rect,
+                &shorten("Smooth Playback", ((rect.w - 10) / 6).max(8) as usize),
+                (None, (rect.w >= 145).then_some("ChevronDown")),
                 v,
-                (v.menu == Some(Menu::Prepare), true),
+                (v.menu == Some(Menu::Prepare) || busy, true),
                 Action::Menu(Menu::Prepare),
             );
         }
@@ -759,7 +765,7 @@ fn slideshow_anchor(v: View<'_>) -> Rect {
 
 fn prepare_anchor(v: View<'_>) -> Rect {
     let edge = v.w - 13;
-    let width = (edge - 10).min(137);
+    let width = (edge - 10).min(164);
     Rect::new(edge - width, 57, width, 32)
 }
 
@@ -865,7 +871,7 @@ fn prepare_panel(f: &mut Frame, v: View<'_>, prepare: PrepareView<'_>) {
         ACCENT,
         true,
         &shorten(
-            "PREPARE SMOOTH PLAYBACK",
+            "SMOOTH PLAYBACK",
             ((width - pixels(34)) / pixels(6)).max(7) as usize,
         ),
     );
@@ -1474,6 +1480,40 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             }));
             "SUBTITLE ENCODING"
         }
+        Menu::SubtitleFont => {
+            let query = v.font_query.trim().to_lowercase();
+            if query.is_empty() {
+                rows.push(selected(
+                    "System default",
+                    Action::SubtitleFont(None),
+                    v.subtitle_font.is_none(),
+                ));
+            }
+            match v.font_catalog {
+                Catalog::Ready(fonts) => {
+                    let start = rows.len();
+                    rows.extend(fonts.iter().enumerate().filter_map(|(i, font)| {
+                        font.to_lowercase().contains(&query).then(|| {
+                            selected(
+                                font,
+                                Action::SubtitleFont(Some(i)),
+                                v.subtitle_font == Some(font),
+                            )
+                        })
+                    }));
+                    if rows.len() == start {
+                        rows.push(note(if query.is_empty() {
+                            "No system fonts found."
+                        } else {
+                            "No matching fonts."
+                        }));
+                    }
+                }
+                Catalog::Failed => rows.push(note("Couldn’t read the system fonts.")),
+                _ => rows.push(note("Loading system fonts…")),
+            }
+            "SUBTITLE FONT"
+        }
         Menu::Settings => {
             for (text, speed) in [
                 ("0.5×", "0.5"),
@@ -1621,23 +1661,22 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
         _ => (v.w - pixels(20)).min(pixels(390)),
     };
     let row_height = pixels(28);
+    let header = pixels(if menu == Menu::SubtitleFont { 70 } else { 34 });
     let footer = pixels(match menu {
         Menu::Playlist | Menu::Slideshow => 42,
-        Menu::Subtitles => 76,
+        Menu::Subtitles => 111,
         _ => 8,
     });
     let available = match menu {
-        Menu::Context => v.h - 16 - pixels(34) - footer,
-        Menu::Slideshow => {
-            v.h - bottom_height(v) - slideshow_anchor(v).y - 36 - pixels(34) - footer
-        }
-        _ => v.h - bottom_height(v) - 48 - pixels(34 + 6) - footer,
+        Menu::Context => v.h - 16 - header - footer,
+        Menu::Slideshow => v.h - bottom_height(v) - slideshow_anchor(v).y - 36 - header - footer,
+        _ => v.h - bottom_height(v) - 48 - header - pixels(6) - footer,
     };
     let max_rows = (available / row_height).clamp(1, 12) as usize;
     let max_scroll = rows.len().saturating_sub(max_rows);
     let scroll = v.scroll.min(max_scroll);
     let end = (scroll + max_rows).min(rows.len());
-    let height = (end - scroll) as i32 * row_height + pixels(34) + footer;
+    let height = (end - scroll) as i32 * row_height + header + footer;
     let (x, y) = match menu {
         Menu::Open => (OPEN_LEFT, 48),
         Menu::Slideshow => {
@@ -1713,8 +1752,44 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             &format!("{} items", v.media.playlist.len()),
         );
     }
+    if menu == Menu::SubtitleFont {
+        let search = Rect::new(
+            x + pixels(10),
+            y + pixels(29),
+            width - pixels(20),
+            pixels(30),
+        );
+        f.rect(search, 5, LINE, 0);
+        f.rect(
+            Rect::new(search.x + 1, search.y + 1, search.w - 2, search.h - 2),
+            4,
+            "211A16",
+            0,
+        );
+        let limit = ((search.w - pixels(16)) / pixels(7)).max(4) as usize;
+        let text = if v.font_query.is_empty() {
+            shorten("Type to search fonts…", limit)
+        } else {
+            let start = v
+                .font_query
+                .chars()
+                .count()
+                .saturating_sub(limit.saturating_sub(2));
+            let query: String = v.font_query.chars().skip(start).collect();
+            format!("{}{query}│", if start > 0 { "…" } else { "" })
+        };
+        f.text(
+            search.x + pixels(8),
+            search.y + search.h / 2,
+            pixels(12),
+            4,
+            if v.font_query.is_empty() { MUTED } else { TEXT },
+            false,
+            &text,
+        );
+    }
     for (i, item) in rows.into_iter().skip(scroll).take(end - scroll).enumerate() {
-        let row_y = y + pixels(30) + i as i32 * row_height;
+        let row_y = y + header - pixels(4) + i as i32 * row_height;
         let r = Rect::new(x + pixels(5), row_y, width - pixels(10), pixels(26));
         if item.active || (r.contains(v.mouse) && item.action.is_some()) {
             f.rect(
@@ -1857,18 +1932,31 @@ fn subtitle_options(f: &mut Frame, v: View<'_>, x: i32, y: i32, width: i32) {
         );
         f.hit(part, Action::SubtitleDirection(direction));
     }
-    let button = Rect::new(left, y + pixels(39), width - pixels(20), pixels(29));
-    f.labeled_button(
-        button,
-        &shorten(
-            &format!("Encoding: {}", v.subtitle_encoding.label),
-            ((button.w - pixels(34)) / pixels(7)).max(6) as usize,
+    for (offset, label, menu) in [
+        (
+            39,
+            format!("Encoding: {}", v.subtitle_encoding.label),
+            Menu::SubtitleEncoding,
         ),
-        (None, Some("ChevronDown")),
-        v,
-        (false, true),
-        Action::Menu(Menu::SubtitleEncoding),
-    );
+        (
+            73,
+            format!("Font: {}", v.subtitle_font.unwrap_or("System default")),
+            Menu::SubtitleFont,
+        ),
+    ] {
+        let button = Rect::new(left, y + pixels(offset), width - pixels(20), pixels(29));
+        f.labeled_button(
+            button,
+            &shorten(
+                &label,
+                ((button.w - pixels(34)) / pixels(7)).max(6) as usize,
+            ),
+            (None, Some("ChevronDown")),
+            v,
+            (false, true),
+            Action::Menu(menu),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1954,8 +2042,12 @@ mod tests {
             live_playing: false,
             prepare: None,
             caption: None,
+            caption_style: CaptionStyle::default(),
             subtitle_direction: None,
             subtitle_encoding: ENCODINGS[0],
+            subtitle_font: None,
+            font_catalog: &Catalog::Unloaded,
+            font_query: "",
             photo_zoom: PhotoZoom::Fit,
             slideshow_playing: false,
             slideshow_music: None,
@@ -2003,11 +2095,65 @@ mod tests {
         assert_eq!(ltr.x + ltr.w, rtl.x);
         assert_eq!(ltr.y, rtl.y);
         assert!(hit(Action::Menu(Menu::SubtitleEncoding)).y > rtl.y + rtl.h);
+        assert!(
+            hit(Action::Menu(Menu::SubtitleFont)).y > hit(Action::Menu(Menu::SubtitleEncoding)).y
+        );
         v.menu = Some(Menu::SubtitleEncoding);
         let frame = draw(v);
         assert!(frame.hits.iter().any(
             |(_, action)| matches!(action, Action::SubtitleEncoding(e) if e.label.contains("1256"))
         ));
+    }
+
+    #[test]
+    fn font_picker_keeps_original_indices_when_filtered() {
+        let media = Media {
+            kind: Kind::Video,
+            ..Default::default()
+        };
+        let catalog = Catalog::Ready(vec!["DejaVu Sans".into(), "Noto Sans Arabic".into()]);
+        let mut v = video(&media);
+        v.menu = Some(Menu::SubtitleFont);
+        v.font_catalog = &catalog;
+        let unfiltered = draw(v);
+        assert!(
+            unfiltered
+                .hits
+                .iter()
+                .any(|(_, action)| *action == Action::SubtitleFont(None))
+        );
+        v.font_query = "ARABIC";
+        let filtered = draw(v);
+        assert!(
+            filtered
+                .hits
+                .iter()
+                .any(|(_, action)| *action == Action::SubtitleFont(Some(1)))
+        );
+        assert!(
+            !filtered
+                .hits
+                .iter()
+                .any(|(_, action)| *action == Action::SubtitleFont(Some(0)))
+        );
+    }
+
+    #[test]
+    fn directed_subtitle_inherits_the_selected_mpv_font() {
+        let media = Media {
+            kind: Kind::Video,
+            ..Default::default()
+        };
+        let mut v = video(&media);
+        v.caption = Some("test caption");
+        let frame = draw(v);
+        let cue = frame
+            .osd()
+            .lines()
+            .find(|line| line.ends_with("test caption"))
+            .unwrap();
+        assert!(cue.contains(r"\fs31.67\bord1.38"));
+        assert!(!cue.contains(r"\fn"));
     }
 
     #[test]

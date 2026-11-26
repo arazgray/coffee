@@ -83,7 +83,7 @@ pub enum Event {
     Action(String),
     Pointer(PointerEvent),
     PlaylistChanged,
-    StreamText(String),
+    TextInput(String),
     Changed,
 }
 
@@ -592,10 +592,10 @@ impl Engine {
                         }
                     }
                     "key-binding"
-                        if args.len() >= 5 && c_string(args[1]) == "coffee-stream-text" =>
+                        if args.len() >= 5 && c_string(args[1]) == "coffee-text-entry" =>
                     {
                         match c_string(args[2]).as_bytes().first() {
-                            Some(b'd' | b'p' | b'r') => Event::StreamText(c_string(args[4])),
+                            Some(b'd' | b'p' | b'r') => Event::TextInput(c_string(args[4])),
                             _ => Event::Changed,
                         }
                     }

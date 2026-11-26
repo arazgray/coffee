@@ -12,8 +12,72 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
+
+struct Sample {
+    at: Instant,
+    position: f64,
+    drops: u64,
+}
+
+#[derive(Default)]
+pub struct PlaybackHealth {
+    last: Option<Sample>,
+    bad: u8,
+    detected: bool,
+}
+
+impl PlaybackHealth {
+    pub fn detected(&self) -> bool {
+        self.detected
+    }
+
+    pub fn interrupt(&mut self) {
+        self.last = None;
+        self.bad = 0;
+    }
+
+    pub fn due(&self, now: Instant) -> bool {
+        !self.detected
+            && self
+                .last
+                .as_ref()
+                .is_none_or(|last| now - last.at >= HEALTH_INTERVAL)
+    }
+
+    pub fn observe(&mut self, now: Instant, position: f64, speed: f64, fps: f64, drops: u64) {
+        let Some(last) = self.last.replace(Sample {
+            at: now,
+            position,
+            drops,
+        }) else {
+            return;
+        };
+        let elapsed = (now - last.at).as_secs_f64();
+        let expected = elapsed * speed;
+        let advanced = position - last.position;
+        if !(0.8..=3.0).contains(&elapsed)
+            || expected <= 0.0
+            || advanced < -0.15
+            || advanced > expected * 1.65 + 0.2
+            || drops < last.drops
+        {
+            // Counter resets and seek/discontinuity jumps are not lag.
+            self.bad = 0;
+            return;
+        }
+        let min_drops = (fps * expected * 0.08).ceil().max(3.0) as u64;
+        if drops - last.drops >= min_drops || advanced < expected * 0.55 {
+            self.bad += 1;
+            self.detected |= self.bad >= 2;
+        } else {
+            self.bad = 0;
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Target {
@@ -404,6 +468,30 @@ fn update_progress(progress: &mut Progress, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_needs_sustained_drops_and_ignores_a_seek() {
+        let t = Instant::now();
+        let mut health = PlaybackHealth::default();
+        for (s, position, drops) in [(0, 0.0, 0), (1, 1.0, 9), (2, 41.0, 9), (3, 42.0, 17)] {
+            health.observe(t + Duration::from_secs(s), position, 1.0, 60.0, drops);
+            assert!(!health.detected());
+        }
+        health.observe(t + Duration::from_secs(4), 43.0, 1.0, 60.0, 27);
+        assert!(health.detected());
+        health.interrupt();
+        assert!(health.detected()); // Stay available once offered for this item.
+    }
+
+    #[test]
+    fn health_can_recognize_stalled_playback_without_drops() {
+        let mut health = PlaybackHealth::default();
+        let t = Instant::now();
+        for (second, position) in [(0, 1.0), (1, 1.2), (2, 1.5)] {
+            health.observe(t + Duration::from_secs(second), position, 1.0, 24.0, 0);
+        }
+        assert!(health.detected());
+    }
 
     #[test]
     fn ffmpeg_eta_uses_media_time_and_reported_wall_clock_speed() {

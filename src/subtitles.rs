@@ -1,4 +1,35 @@
-use crate::engine::Engine;
+use crate::{engine::Engine, fonts::valid_family};
+use std::{env, fs, path::PathBuf};
+
+#[derive(Clone, Copy, Debug)]
+pub struct CaptionStyle {
+    pub size: f64,
+    pub outline: f64,
+    pub margin: f64,
+}
+
+impl Default for CaptionStyle {
+    fn default() -> Self {
+        Self {
+            size: 38.0,
+            outline: 1.65,
+            margin: 34.0,
+        }
+    }
+}
+
+fn font_preference() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    let config = env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| std::path::Path::new(path).is_absolute())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    #[cfg(target_os = "macos")]
+    let config = PathBuf::from(env::var_os("HOME")?).join("Library/Application Support");
+    #[cfg(target_os = "windows")]
+    let config = PathBuf::from(env::var_os("APPDATA")?);
+    Some(config.join("coffee").join("subtitle-font"))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -132,6 +163,9 @@ fn is_text(codec: &str) -> bool {
 pub struct Subtitles {
     pub direction: Option<Direction>,
     pub encoding: Encoding,
+    pub style: CaptionStyle,
+    pub font: Option<String>,
+    default_font: String,
     visible: bool,
     native_visible: bool,
     current_text: bool,
@@ -143,6 +177,9 @@ impl Default for Subtitles {
         Self {
             direction: None,
             encoding: ENCODINGS[0],
+            style: CaptionStyle::default(),
+            font: None,
+            default_font: "sans-serif".into(),
             visible: true,
             native_visible: true,
             current_text: false,
@@ -152,6 +189,55 @@ impl Default for Subtitles {
 }
 
 impl Subtitles {
+    pub fn new(mpv: &Engine) -> Result<Self, String> {
+        let mut this = Self::default();
+        let native = mpv.get("sub-font");
+        if let Some(family) = native.as_str().filter(|name| valid_family(name)) {
+            this.default_font = family.to_owned();
+        }
+        let option = |name, fallback| mpv.get(name).as_f64().unwrap_or(fallback);
+        this.style = CaptionStyle {
+            size: option("sub-font-size", this.style.size),
+            outline: option("sub-outline-size", this.style.outline),
+            margin: option("sub-margin-y", this.style.margin),
+        };
+        this.font = font_preference()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| valid_family(s));
+        this.apply_font(mpv, this.font.as_deref())?;
+        Ok(this)
+    }
+
+    fn apply_font(&self, mpv: &Engine, font: Option<&str>) -> Result<(), String> {
+        let family = font.unwrap_or(&self.default_font);
+        mpv.set("sub-font", family)?;
+        // Directed captions use the ASS overlay. Its inherited font must
+        // match native subtitles; Coffee's UI text sets its own font.
+        mpv.set("osd-font", family)?;
+        let override_style = font
+            .map(|name| format!("FontName={}", name.replace(',', "\\,")))
+            .unwrap_or_default();
+        mpv.set("sub-ass-style-overrides", &override_style)
+    }
+
+    pub fn set_font(&mut self, mpv: &Engine, font: Option<&str>) -> Result<(), String> {
+        if font == self.font.as_deref() {
+            return Ok(());
+        }
+        if font.is_some_and(|name| !valid_family(name)) {
+            return Err("That subtitle font name is invalid.".into());
+        }
+        self.apply_font(mpv, font)?;
+        self.font = font.map(str::to_owned);
+        if let Some(path) = font_preference() {
+            fs::create_dir_all(path.parent().unwrap())
+                .and_then(|()| fs::write(path, font.unwrap_or_default()))
+                .map_err(|e| format!("Couldn’t save the subtitle font: {e}"))?;
+        }
+        Ok(())
+    }
+
     pub fn refresh(&mut self, mpv: &Engine) {
         self.current_text = mpv
             .get("current-tracks/sub/codec")

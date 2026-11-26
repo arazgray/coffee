@@ -6,7 +6,7 @@ License: MIT AND ISC
 URL: https://github.com/arazgray/coffee
 Requires: mpv-libs >= 0.41
 Requires: kdialog, xdg-utils
-Recommends: libheif
+Recommends: libheif, fontconfig
 %global debug_package %{nil}
 
 %description
