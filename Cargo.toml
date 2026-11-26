@@ -1,0 +1,27 @@
+[package]
+name = "coffee"
+version = "0.1.0"
+edition = "2024"
+description = "Coffee, a native libmpv media player"
+
+[dependencies]
+libloading = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2.5"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSAppearance", "NSResponder", "NSRunningApplication"] }
+
+[build-dependencies]
+serde_json = "1"
+tiny-skia-path = "0.12"
+usvg = { version = "0.50", default-features = false }
+
+[profile.release]
+lto = "thin"
+strip = true
