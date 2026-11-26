@@ -429,7 +429,6 @@ pub struct View<'a> {
     pub fast_render: bool,
     pub speed: f64,
     pub quality: &'a str,
-    pub fade: f64,
     pub toast: &'a str,
 }
 
@@ -453,14 +452,6 @@ pub fn draw(mut v: View<'_>) -> Frame {
     let (w, h) = (v.w, v.h);
     if w < 120 || h < 120 {
         return f;
-    }
-    if v.fade > 0.0 {
-        f.rect(
-            Rect::new(0, 0, w, h),
-            0,
-            "0C0B0A",
-            ((1.0 - v.fade.clamp(0.0, 1.0)) * 255.0) as u8,
-        );
     }
     let empty = v.media.kind == Kind::Empty;
     if empty {
@@ -1416,7 +1407,6 @@ mod tests {
             fast_render: false,
             speed: 1.0,
             quality: "max",
-            fade: 0.0,
             toast: "",
         }
     }

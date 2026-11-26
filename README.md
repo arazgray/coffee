@@ -16,7 +16,8 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 ## Playback
 
 - Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
-- Open a photo to browse supported images in its folder with **Previous** and **Next**. Filenames are sorted naturally. A same-named `.MOV` companion adds a **Live** badge to the photo; click it to play the clip and automatically return to the still. The preview does not leave an extra playlist item.
+- Open a photo to browse nearby images with **Previous** and **Next**. Coffee preloads five photos on each side and their Live clips in the background, prioritizing the current Live clip. The RAM cache is bounded at 256 MiB (128 MiB per file); uncached files still open normally.
+- A same-named `.MOV` companion adds a **Live** badge. Click it to play the clip and automatically return to the still without adding a playlist item. Photo changes and Live previews blend directly into the next frame over 150 ms, without fading to black.
 - **Open Streams** uses the player's own dark URL dialog. It accepts HLS, DASH, and direct HTTP(S) URLs. Paste with **Ctrl+V** (or **Command+V** where supported).
 - The default filters include common video, audio, and image formats. Supported images include JPEG, PNG/APNG, HEIC/HEIF, AVIF, JPEG XL, QOI, WebP (lossy, lossless, and animated), TIFF, GIF, BMP, and JPEG 2000. Animated WebP from a local file works on older FFmpeg builds too. Experimental WebP v2 is not supported.
 - Full-resolution tiled HEIC/HEIF (common on iPhones) uses libheif with an HEVC decoder plugin when installed. The Debian package recommends `libheif-plugin-libde265`; Fedora users may need `libheif-freeworld` from RPM Fusion. Codec availability otherwise depends on the libmpv/FFmpeg build.

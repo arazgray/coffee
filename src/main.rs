@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod crossfade;
 mod engine;
 mod gpu;
 mod heif_source;
@@ -7,11 +8,13 @@ mod image_source;
 mod library;
 mod photos;
 mod platform;
+mod preload;
 mod scale;
 mod state;
 mod ui;
 
-use engine::{Engine, Event, PointerEvent};
+use crossfade::Crossfade;
+use engine::{Engine, Event, PointerEvent, Snapshot};
 use gpu::{DecodeChoice, Devices};
 use photos::PhotoFolder;
 use state::{Hdr, Kind, Media, RenderMode, display_name, image_path, is_stream};
@@ -188,12 +191,6 @@ impl Timings {
             mouse: mouse_position(mpv),
         }
     }
-}
-
-struct Fade {
-    start: Instant,
-    target: usize,
-    switched: bool,
 }
 
 struct LivePreview {
@@ -385,7 +382,12 @@ struct App {
     last_volume: f64,
     picker: bool,
     recent: PathBuf,
-    fade: Option<Fade>,
+    fade: Option<Crossfade>,
+    active_file: Option<i64>,
+    ready_still: bool,
+    still_snapshot: Option<Snapshot>,
+    capture_attempt: Option<(i32, i32)>,
+    capture_request: u64,
     photos: Option<PhotoFolder>,
     live: Option<LivePreview>,
     stream: Option<StreamInput>,
@@ -501,7 +503,7 @@ impl App {
         if let Some(first) = valid.next() {
             if !append {
                 self.photos = None;
-                self.fade = None;
+                self.clear_crossfade();
                 self.finish_live(false);
             }
             let _ = self.mpv.command(&[
@@ -528,6 +530,7 @@ impl App {
     fn prepare_photos(&mut self) {
         if self.media.kind != Kind::Image {
             self.photos = None;
+            self.mpv.preload(Vec::new());
             return;
         }
         if self
@@ -535,9 +538,11 @@ impl App {
             .as_mut()
             .is_some_and(|folder| folder.select(Path::new(&self.media.path)))
         {
+            self.warm_photos();
             return;
         }
         self.photos = PhotoFolder::scan(&self.media.path);
+        self.warm_photos();
         if let Some(folder) = &self.photos
             && self.media.playlist.len() == 1
             && folder.files().len() > 1
@@ -561,6 +566,15 @@ impl App {
         }
     }
 
+    fn warm_photos(&self) {
+        self.mpv.preload(
+            self.photos
+                .as_ref()
+                .map(PhotoFolder::preload_paths)
+                .unwrap_or_default(),
+        );
+    }
+
     fn play_dropped_files(&mut self) {
         if !self
             .playlist_changed
@@ -574,7 +588,7 @@ impl App {
         // playlist; otherwise select the first new entry without replacing
         // the existing queue. Batch the notifications for multi-file drops.
         if let Some(index) = before.first_drop(&self.queue_snapshot) {
-            self.fade = None;
+            self.clear_crossfade();
             self.pending_click = None;
             if let Err(error) = self
                 .mpv
@@ -670,8 +684,15 @@ impl App {
         let queue = QueueSnapshot::read(&self.mpv);
         let photo_id = queue.current.ok_or("No active photo")?;
         let index = queue.ids.len();
-        self.mpv
-            .command(&["loadfile", &clip.to_string_lossy(), "append"])?;
+        // Retain the clip's final frame for the return blend, even if items
+        // have been added after the preview in the meantime.
+        self.mpv.command(&[
+            "loadfile",
+            &clip.to_string_lossy(),
+            "append",
+            "-1",
+            "keep-open=always",
+        ])?;
         self.queue_snapshot = QueueSnapshot::read(&self.mpv);
         let clip_id = *self
             .queue_snapshot
@@ -679,14 +700,9 @@ impl App {
             .get(index)
             .ok_or("Could not queue the Live Photo clip")?;
         self.live = Some(LivePreview { photo_id, clip_id });
-        self.fade = None;
-        let result = self
-            .mpv
-            .command(&["playlist-play-index", &index.to_string()]);
+        let result = self.crossfade_to(index, clip_id);
         if result.is_err() {
             self.finish_live(false);
-        } else {
-            let _ = self.mpv.set("pause", "no");
         }
         result
     }
@@ -698,10 +714,7 @@ impl App {
         let queue = QueueSnapshot::read(&self.mpv);
         if resume_photo && let Some(index) = queue.ids.iter().position(|id| *id == preview.photo_id)
         {
-            let _ = self
-                .mpv
-                .command(&["playlist-play-index", &index.to_string()]);
-            let _ = self.mpv.set("pause", "no");
+            let _ = self.crossfade_to(index, preview.photo_id);
         }
         if let Some(index) = queue.ids.iter().position(|id| *id == preview.clip_id) {
             let _ = self.mpv.command(&["playlist-remove", &index.to_string()]);
@@ -718,12 +731,13 @@ impl App {
                 .is_some_and(|path| image_path(path))
             && Some(index) != self.media.index
         {
-            self.fade = Some(Fade {
-                start: Instant::now(),
-                target: index,
-                switched: false,
-            });
+            if let Some(&id) = QueueSnapshot::read(&self.mpv).ids.get(index)
+                && let Err(error) = self.crossfade_to(index, id)
+            {
+                self.note(error);
+            }
         } else {
+            self.clear_crossfade();
             let _ = self
                 .mpv
                 .command(&["playlist-play-index", &index.to_string()]);
@@ -731,25 +745,42 @@ impl App {
         }
     }
 
-    fn fade_opacity(&mut self) -> f64 {
-        let Some(fade) = &mut self.fade else {
-            return 0.0;
-        };
-        let elapsed = fade.start.elapsed().as_secs_f64();
-        if elapsed >= 0.105 && !fade.switched {
-            let _ = self
-                .mpv
-                .command(&["playlist-play-index", &fade.target.to_string()]);
-            let _ = self.mpv.set("pause", "no");
-            fade.switched = true;
+    fn crossfade_to(&mut self, index: usize, id: i64) -> Result<(), String> {
+        let display = self.timing.dimensions;
+        let snapshot = self
+            .still_snapshot
+            .take()
+            .filter(|shot| (shot.width as i32, shot.height as i32) == display);
+        self.fade = Crossfade::begin(&self.mpv, id, display, self.fade.take(), snapshot);
+        if self.fade.is_none() {
+            let _ = self.mpv.command(&["overlay-remove", "1"]);
         }
-        if elapsed > 0.25 {
-            self.fade = None;
-            0.0
-        } else if elapsed <= 0.105 {
-            elapsed / 0.105
-        } else {
-            1.0 - (elapsed - 0.105) / 0.145
+        if let Err(error) = self
+            .mpv
+            .command(&["playlist-play-index", &index.to_string()])
+        {
+            self.clear_crossfade();
+            return Err(error);
+        }
+        self.mpv.set("pause", "no")
+    }
+
+    fn clear_crossfade(&mut self) {
+        if self.fade.take().is_some() {
+            let _ = self.mpv.command(&["overlay-remove", "1"]);
+        }
+    }
+
+    fn capture_still(&mut self, dimensions: (i32, i32)) {
+        if self.ready_still
+            && self.fade.is_none()
+            && self.capture_attempt != Some(dimensions)
+            && u64::try_from(i64::from(dimensions.0) * i64::from(dimensions.1))
+                .is_ok_and(|pixels| (1..=16 * 1024 * 1024).contains(&pixels))
+        {
+            self.capture_attempt = Some(dimensions);
+            self.capture_request = self.capture_request.wrapping_add(1);
+            self.mpv.request_snapshot(self.capture_request);
         }
     }
 
@@ -998,6 +1029,8 @@ impl App {
             }
             Action::Hdr(mode) => mode.apply(&self.mpv).map(|()| {
                 self.hdr = mode;
+                self.still_snapshot = None;
+                self.capture_attempt = None;
             }),
             Action::Decode(choice) => {
                 if self.decoder == choice && env::var_os("KAHVE_HWDEC").is_none() {
@@ -1174,6 +1207,16 @@ impl App {
         match event {
             Event::Shutdown => return false,
             Event::Start(id) => {
+                self.active_file = Some(id);
+                self.ready_still = false;
+                self.still_snapshot = None;
+                self.capture_attempt = None;
+                self.capture_request = self.capture_request.wrapping_add(1);
+                if self.fade.as_ref().is_some_and(|fade| fade.target != id)
+                    && QueueSnapshot::read(&self.mpv).current == Some(id)
+                {
+                    self.clear_crossfade();
+                }
                 if self.live.as_ref().is_some_and(|live| live.clip_id != id) {
                     self.finish_live(false);
                 }
@@ -1198,9 +1241,24 @@ impl App {
                     self.finish_live(true);
                 }
                 if let Some(error) = error {
+                    if self.fade.as_ref().is_some_and(|fade| fade.target == id) {
+                        self.clear_crossfade();
+                    }
                     self.note(format!("Couldn’t play this item: {error}"));
                 }
                 self.refresh_media();
+            }
+            Event::FrameReady => {
+                if let (Some(fade), Some(id)) = (&mut self.fade, self.active_file) {
+                    fade.ready(id, Instant::now());
+                }
+                self.ready_still = self.media.kind == Kind::Image
+                    && self.mpv.get("current-tracks/video/image").as_bool() == Some(true);
+            }
+            Event::SnapshotReady(request, snapshot) => {
+                if request == self.capture_request {
+                    self.still_snapshot = snapshot;
+                }
             }
             Event::Pointer(event) => self.pointer(event),
             Event::PlaylistChanged => self.playlist_changed = Some(Instant::now()),
@@ -1258,7 +1316,10 @@ impl App {
         #[cfg(windows)]
         let mut dark_hwnd = None;
         loop {
-            let interval = if self.controls.active(Instant::now()) || self.dragging_volume() {
+            let interval = if self.fade.is_some()
+                || self.controls.active(Instant::now())
+                || self.dragging_volume()
+            {
                 Duration::from_millis(16)
             } else {
                 Duration::from_millis(30)
@@ -1311,9 +1372,16 @@ impl App {
             let (w, h) = timing.dimensions;
             let resize = timing.dimensions != self.timing.dimensions;
             self.timing = timing;
-            let fade = self.fade_opacity();
             if w <= 0 || h <= 0 {
                 continue;
+            }
+            self.capture_still((w, h));
+            if self
+                .fade
+                .as_mut()
+                .is_some_and(|fade| !fade.draw(&self.mpv, (w, h), Instant::now()))
+            {
+                self.clear_crossfade();
             }
             #[cfg(windows)]
             if (resize || dark_hwnd.is_none())
@@ -1377,7 +1445,6 @@ impl App {
                 fast_render: self.fast_render,
                 speed: self.timing.speed,
                 quality: self.quality,
-                fade,
                 toast: if self.toast.1.elapsed() < Duration::from_secs(4) {
                     &self.toast.0
                 } else {
@@ -1405,9 +1472,23 @@ impl App {
     }
 }
 
-fn smoke(path: &str) -> Result<(), String> {
+fn smoke(path: &str, cached: bool) -> Result<(), String> {
     let mpv = Engine::create(None, true, None)?;
     let path = library::normalize(path).ok_or("Not a playable path")?;
+    if cached {
+        let source = Path::new(&path);
+        if !source.is_file() {
+            return Err("--preload needs a local file".into());
+        }
+        mpv.preload(vec![source.to_path_buf()]);
+        let deadline = Instant::now() + Duration::from_secs(7);
+        while !mpv.is_preloaded(source) {
+            if Instant::now() >= deadline {
+                return Err("Timed out waiting for the RAM preload".into());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
     mpv.command(&["loadfile", &path])?;
     let start = Instant::now();
     let mut loaded = false;
@@ -1420,6 +1501,14 @@ fn smoke(path: &str) -> Result<(), String> {
             _ => {}
         }
         if loaded && (mpv.get("video-params").is_object() || mpv.get("audio-params").is_object()) {
+            if cached
+                && !mpv
+                    .get("stream-open-filename")
+                    .as_str()
+                    .is_some_and(|p| p.starts_with("coffee-ram://"))
+            {
+                return Err("libmpv did not open the preloaded RAM stream".into());
+            }
             let media = Media::read(&mpv);
             println!(
                 "Loaded: {}\nlibmpv: {}",
@@ -1445,12 +1534,16 @@ fn entry() -> Result<(), String> {
     let mut arguments = env::args_os().skip(1);
     let first = arguments.next();
     if first.as_deref().is_some_and(|x| x == "--smoke-test") {
-        return smoke(
-            &arguments
+        let second = arguments.next().ok_or("Provide a file for --smoke-test")?;
+        let cached = second == "--preload";
+        let path = if cached {
+            arguments
                 .next()
-                .ok_or("Provide a file for --smoke-test")?
-                .to_string_lossy(),
-        );
+                .ok_or("Provide a file for --smoke-test --preload")?
+        } else {
+            second
+        };
+        return smoke(&path.to_string_lossy(), cached);
     }
     if first.as_deref().is_some_and(|x| x == "--version") {
         println!("Coffee {}", env!("CARGO_PKG_VERSION"));
@@ -1509,6 +1602,11 @@ fn entry() -> Result<(), String> {
         picker: false,
         recent,
         fade: None,
+        active_file: None,
+        ready_still: false,
+        still_snapshot: None,
+        capture_attempt: None,
+        capture_request: 0,
         photos: None,
         live: None,
         stream: None,

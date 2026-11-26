@@ -6,7 +6,7 @@ use std::{
     cell::RefCell,
     ffi::{CStr, CString, c_char, c_int, c_void},
     os::raw::c_double,
-    path::Path,
+    path::{Path, PathBuf},
     ptr, slice,
 };
 
@@ -21,6 +21,13 @@ union NodeData {
     int64: i64,
     double_: c_double,
     list: *mut NodeList,
+    bytes: *mut ByteArray,
+}
+
+#[repr(C)]
+struct ByteArray {
+    data: *const u8,
+    size: usize,
 }
 
 #[repr(C)]
@@ -67,6 +74,8 @@ pub enum Event {
     Shutdown,
     Start(i64),
     Loaded,
+    FrameReady,
+    SnapshotReady(u64, Option<Snapshot>),
     End {
         id: i64,
         eof: bool,
@@ -93,12 +102,16 @@ struct Api {
     destroy: unsafe extern "C" fn(Handle),
     set_option_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     command: unsafe extern "C" fn(Handle, *const *const c_char) -> c_int,
+    command_ret: unsafe extern "C" fn(Handle, *const *const c_char, *mut Node) -> c_int,
+    command_async: unsafe extern "C" fn(Handle, u64, *const *const c_char) -> c_int,
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     observe_property: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
     free_node_contents: unsafe extern "C" fn(*mut Node),
     wait_event: unsafe extern "C" fn(Handle, c_double) -> *mut MpvEvent,
     hook_add: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
     hook_continue: unsafe extern "C" fn(Handle, u64) -> c_int,
+    stream_add:
+        unsafe extern "C" fn(Handle, *const c_char, *mut c_void, crate::preload::OpenFn) -> c_int,
     error_string: unsafe extern "C" fn(c_int) -> *const c_char,
 }
 
@@ -128,12 +141,15 @@ impl Api {
                 destroy: symbol!("mpv_terminate_destroy"),
                 set_option_string: symbol!("mpv_set_option_string"),
                 command: symbol!("mpv_command"),
+                command_ret: symbol!("mpv_command_ret"),
+                command_async: symbol!("mpv_command_async"),
                 get_property: symbol!("mpv_get_property"),
                 observe_property: symbol!("mpv_observe_property"),
                 free_node_contents: symbol!("mpv_free_node_contents"),
                 wait_event: symbol!("mpv_wait_event"),
                 hook_add: symbol!("mpv_hook_add"),
                 hook_continue: symbol!("mpv_hook_continue"),
+                stream_add: symbol!("mpv_stream_cb_add_ro"),
                 error_string: symbol!("mpv_error_string"),
                 _lib: lib,
             })
@@ -215,7 +231,22 @@ pub struct Engine {
     api: Api,
     handle: Handle,
     image_source: RefCell<Option<tempfile::NamedTempFile>>,
+    cache: crate::preload::Cache,
+    stream_slot: Box<crate::preload::StreamSlot>,
 }
+
+pub struct Snapshot {
+    pub width: usize,
+    pub height: usize,
+    pub bgra: Vec<u8>,
+}
+
+const SNAPSHOT_ARGS: [*const c_char; 4] = [
+    c"screenshot-raw".as_ptr(),
+    c"scaled".as_ptr(),
+    c"bgra".as_ptr(),
+    ptr::null(),
+];
 
 impl Engine {
     pub fn create(
@@ -232,6 +263,8 @@ impl Engine {
             api,
             handle,
             image_source: RefCell::new(None),
+            cache: crate::preload::Cache::new(),
+            stream_slot: Box::default(),
         };
         let options = [
             ("config", "no"),
@@ -322,6 +355,17 @@ impl Engine {
         if code < 0 {
             return Err(mpv.api.error(code));
         }
+        let stream = unsafe {
+            (mpv.api.stream_add)(
+                mpv.handle,
+                c"coffee-ram".as_ptr(),
+                ptr::from_ref(&*mpv.stream_slot).cast_mut().cast(),
+                crate::preload::open,
+            )
+        };
+        if stream < 0 {
+            return Err(mpv.api.error(stream));
+        }
         let hook = unsafe { (mpv.api.hook_add)(mpv.handle, 0, c"on_load".as_ptr(), 50) };
         if hook < 0 {
             return Err(mpv.api.error(hook));
@@ -359,6 +403,62 @@ impl Engine {
 
     pub fn set(&self, key: &str, value: &str) -> Result<(), String> {
         self.command(&["set", key, value])
+    }
+
+    pub fn preload(&self, files: Vec<PathBuf>) {
+        self.cache.plan(files);
+    }
+
+    pub fn is_preloaded(&self, path: &Path) -> bool {
+        self.cache.get(path).is_some()
+    }
+
+    pub fn snapshot(&self) -> Option<Snapshot> {
+        let dimensions = self.get("osd-dimensions");
+        let pixels = dimensions["w"]
+            .as_u64()?
+            .checked_mul(dimensions["h"].as_u64()?)?;
+        if pixels == 0 || pixels > 16 * 1024 * 1024 {
+            return None;
+        }
+        // Capture the complete presentation area (including letterboxing)
+        // without the UI. The new frame is still rendered by the same VO.
+        let mut out = Node {
+            data: NodeData { int64: 0 },
+            format: 0,
+        };
+        if unsafe { (self.api.command_ret)(self.handle, SNAPSHOT_ARGS.as_ptr(), &mut out) } < 0 {
+            return None;
+        }
+        let snapshot = unsafe { copy_snapshot(&out) };
+        unsafe { (self.api.free_node_contents)(&mut out) };
+        snapshot
+    }
+
+    pub fn request_snapshot(&self, request: u64) {
+        unsafe { (self.api.command_async)(self.handle, request, SNAPSHOT_ARGS.as_ptr()) };
+    }
+
+    pub fn crossfade_bitmap(&self, shot: &Snapshot, pixels: &[u8], display: (i32, i32)) -> bool {
+        if pixels.len() != shot.width * shot.height * 4 {
+            return false;
+        }
+        // overlay-add copies the buffer before the command returns.
+        self.command(&[
+            "overlay-add",
+            "1",
+            "0",
+            "0",
+            &format!("&{}", pixels.as_ptr() as usize),
+            "0",
+            "bgra",
+            &shot.width.to_string(),
+            &shot.height.to_string(),
+            &(shot.width * 4).to_string(),
+            &display.0.to_string(),
+            &display.1.to_string(),
+        ])
+        .is_ok()
     }
 
     pub fn watch_playlist(&self) -> Result<(), String> {
@@ -403,6 +503,20 @@ impl Engine {
         Some(match event.id {
             0 => return None,
             1 => Event::Shutdown,
+            5 => Event::SnapshotReady(
+                event.reply_userdata,
+                if event.error >= 0 {
+                    unsafe {
+                        event
+                            .data
+                            .cast::<Node>()
+                            .as_ref()
+                            .and_then(|node| copy_snapshot(node))
+                    }
+                } else {
+                    None
+                },
+            ),
             6 => Event::Start(unsafe { *event.data.cast::<i64>().as_ref()? }),
             7 => {
                 let end = unsafe { event.data.cast::<EndFile>().as_ref()? };
@@ -413,6 +527,7 @@ impl Engine {
                 }
             }
             8 => Event::Loaded,
+            21 => Event::FrameReady,
             16 => {
                 let message = unsafe { event.data.cast::<ClientMessage>().as_ref()? };
                 if message.num_args < 2 || message.args.is_null() {
@@ -455,16 +570,22 @@ impl Engine {
 
     fn prepare_image_source(&self) {
         self.image_source.replace(None);
+        self.stream_slot.clear();
         let source = self.get("stream-open-filename");
         let Some(path) = source.as_str() else { return };
         let path = Path::new(path);
-        let media = crate::image_source::animated_webp(path).and_then(|value| {
-            if value.is_none() {
-                crate::heif_source::tiled_heif(path)
-            } else {
-                Ok(value)
+        if let Some(asset) = self.cache.get(path) {
+            let animated_webp = asset.animated_webp;
+            let uri = self.stream_slot.stage(asset);
+            if self.set("stream-open-filename", &uri).is_ok() {
+                let _ = self.set("file-local-options/cache", "no");
+                if animated_webp {
+                    let _ = self.set("file-local-options/demuxer-lavf-o", "ignore_loop=0");
+                }
+                return;
             }
-        });
+        }
+        let media = crate::image_source::prepare_local(path);
         match media {
             Ok(Some(preview)) => {
                 if self
@@ -480,6 +601,62 @@ impl Engine {
             Ok(None) => {}
             Err(error) => eprintln!("{error}"),
         }
+    }
+}
+
+unsafe fn copy_snapshot(node: &Node) -> Option<Snapshot> {
+    if node.format != 8 {
+        return None;
+    }
+    // The result and all of its children belong to libmpv until the caller
+    // frees the node. Copy only validated rows using the reported stride.
+    unsafe {
+        let list = node.data.list.as_ref()?;
+        if !(1..=16).contains(&list.num) || list.keys.is_null() || list.values.is_null() {
+            return None;
+        }
+        let mut width = 0;
+        let mut height = 0;
+        let mut stride = 0;
+        let mut data = None;
+        for index in 0..list.num as usize {
+            let key = CStr::from_ptr(*list.keys.add(index)).to_bytes();
+            let value = &*list.values.add(index);
+            match (key, value.format) {
+                (b"w", 4) => width = usize::try_from(value.data.int64).ok()?,
+                (b"h", 4) => height = usize::try_from(value.data.int64).ok()?,
+                (b"stride", 4) => stride = usize::try_from(value.data.int64).ok()?,
+                (b"data", 9) => data = value.data.bytes.as_ref(),
+                _ => {}
+            }
+        }
+        let data = data?;
+        let row = width.checked_mul(4)?;
+        let length = row.checked_mul(height)?;
+        let required = stride
+            .checked_mul(height.checked_sub(1)?)?
+            .checked_add(row)?;
+        if length == 0
+            || length > 64 * 1024 * 1024
+            || stride < row
+            || required > data.size
+            || data.data.is_null()
+        {
+            return None;
+        }
+        let src = slice::from_raw_parts(data.data, required);
+        let mut bgra = Vec::with_capacity(length);
+        for y in 0..height {
+            bgra.extend_from_slice(&src[y * stride..y * stride + row]);
+        }
+        for pixel in bgra.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        Some(Snapshot {
+            width,
+            height,
+            bgra,
+        })
     }
 }
 

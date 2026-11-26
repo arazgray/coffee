@@ -1,6 +1,6 @@
 [package]
 name = "coffee"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Coffee, a native libmpv media player"
 

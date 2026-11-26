@@ -29,8 +29,8 @@ jobs:
           docker run --rm -v "$PWD:/coffee:ro" ubuntu:26.04 sh -ec '
             apt-get -qq update
             DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends /coffee/dist/*.deb libheif-plugin-libde265
-            coffee --smoke-test /coffee/tests/fixtures/animated.webp
-            output=$(coffee --smoke-test /coffee/tests/fixtures/grid.heic)
+            coffee --smoke-test --preload /coffee/tests/fixtures/animated.webp
+            output=$(coffee --smoke-test --preload /coffee/tests/fixtures/grid.heic)
             printf "%s\n" "$output" | grep -F "128 × 96"
           '
       - uses: actions/upload-artifact@v6
@@ -66,7 +66,7 @@ jobs:
         run: |
           Expand-Archive -Path (Get-ChildItem dist/*.zip).FullName -DestinationPath installed
           foreach ($Fixture in 'animated.webp', 'grid.heic') {
-            $Result = Start-Process installed/Coffee.exe -ArgumentList '--smoke-test', "tests/fixtures/$Fixture" -Wait -PassThru -RedirectStandardOutput smoke.log
+            $Result = Start-Process installed/Coffee.exe -ArgumentList '--smoke-test', '--preload', "tests/fixtures/$Fixture" -Wait -PassThru -RedirectStandardOutput smoke.log
             Get-Content smoke.log
             if ($Result.ExitCode -ne 0) { exit $Result.ExitCode }
             if ($Fixture -eq 'grid.heic' -and -not (Select-String -Quiet -Path smoke.log -Pattern '128 × 96')) { exit 1 }
@@ -98,8 +98,8 @@ jobs:
         run: |
           ditto -x -k dist/*.zip installed
           codesign --verify --strict installed/Coffee.app
-          installed/Coffee.app/Contents/MacOS/Coffee --smoke-test tests/fixtures/animated.webp
-          output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test tests/fixtures/grid.heic)
+          installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/animated.webp
+          output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/grid.heic)
           printf '%s\n' "$output" | grep -F '128 × 96'
       - uses: actions/upload-artifact@v6
         with:

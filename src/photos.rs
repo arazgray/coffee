@@ -72,7 +72,11 @@ impl PhotoFolder {
     }
 
     pub fn live_clip(&self) -> Option<&Path> {
-        let stem = self.files.get(self.index)?.file_stem()?.to_str()?;
+        self.live_clip_for(self.index)
+    }
+
+    fn live_clip_for(&self, index: usize) -> Option<&Path> {
+        let stem = self.files.get(index)?.file_stem()?.to_str()?;
         self.clips
             .get(&stem.to_ascii_lowercase())?
             .iter()
@@ -84,6 +88,33 @@ impl PhotoFolder {
                 )
             })
             .map(PathBuf::as_path)
+    }
+
+    pub fn preload_paths(&self) -> Vec<PathBuf> {
+        let neighborhood = std::iter::once(self.index)
+            .chain((1..=5).flat_map(|distance| {
+                [
+                    self.index.checked_sub(distance),
+                    self.index.checked_add(distance),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|&i| i < self.files.len())
+            }))
+            .collect::<Vec<_>>();
+        // Warm the current Live clip first, then the stills, then the clips
+        // belonging to the neighboring shots.
+        self.live_clip()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain(neighborhood.iter().map(|&i| self.files[i].clone()))
+            .chain(
+                neighborhood
+                    .iter()
+                    .skip(1)
+                    .filter_map(|&i| self.live_clip_for(i).map(Path::to_path_buf)),
+            )
+            .collect()
     }
 
     pub fn adjacent(&self, direction: i32) -> Option<&Path> {
@@ -98,8 +129,8 @@ mod tests {
 
     #[test]
     fn scans_image_siblings_and_matches_only_same_stem_movs() {
-        let dir = std::env::temp_dir().join(format!("coffee-photos-test-{}", std::process::id()));
-        fs::create_dir(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         for name in [
             "IMG_2.jpg",
             "IMG_3.HEIC",
@@ -121,7 +152,28 @@ mod tests {
         assert!(folder.select(&dir.join("IMG_2.jpg")));
         assert!(folder.live_clip().is_none());
         assert!(folder.adjacent(-1).is_none());
-        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preloads_five_on_each_side_and_their_live_clips() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        for i in 0..15 {
+            fs::write(dir.join(format!("Shot {i}.jpg")), []).unwrap();
+            fs::write(dir.join(format!("Shot {i}.MOV")), []).unwrap();
+        }
+        let mut folder = PhotoFolder::scan(dir.join("Shot 7.jpg").to_str().unwrap()).unwrap();
+        let paths = folder.preload_paths();
+        assert_eq!(paths.len(), 22);
+        assert_eq!(paths[0], dir.join("Shot 7.MOV"));
+        assert_eq!(paths[1], dir.join("Shot 7.jpg"));
+        for i in 0..15 {
+            let expected = (2..=12).contains(&i);
+            assert_eq!(paths.contains(&dir.join(format!("Shot {i}.jpg"))), expected);
+            assert_eq!(paths.contains(&dir.join(format!("Shot {i}.MOV"))), expected);
+        }
+        assert!(folder.select(&dir.join("Shot 0.jpg")));
+        assert_eq!(folder.preload_paths().len(), 12);
     }
 }
 

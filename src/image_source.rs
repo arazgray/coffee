@@ -7,6 +7,14 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
+pub fn prepare_local(path: &Path) -> Result<Option<NamedTempFile>, String> {
+    if let Some(preview) = animated_webp(path)? {
+        Ok(Some(preview))
+    } else {
+        crate::heif_source::tiled_heif(path)
+    }
+}
+
 /// FFmpeg before 9.0 cannot decode animated WebP. Give libmpv an equivalent
 /// APNG stream without substituting the original filename in the queue.
 pub fn animated_webp(path: &Path) -> Result<Option<NamedTempFile>, String> {
