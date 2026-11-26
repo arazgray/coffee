@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 1.1** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.1/SHA256SUMS.txt)
+**Coffee 1.2** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.2/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-media-player-1.1.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-media-player-1.1.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.1/coffee-1.1.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-media-player-1.2.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-media-player-1.2.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-windows-x86_64.zip) |
 
 ## Install
 
@@ -61,7 +61,9 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 
 When a local video keeps dropping frames or falling behind, Coffee reveals **Smooth Playback** in the upper-right corner (where **Live** appears for photos). It stays available for that video once detected. Click **Start** in the panel to pause the original and make a reusable H.264 video track at up to 1080p, keeping the frame rate and converting HDR to SDR. The panel shows progress and an ETA; you can close the panel without stopping the job or click **Cancel** to discard the partial copy. Switching to another item also cancels preparation.
 
-Select **Play prepared** to use the saved track, or **Use original** to switch back. Your source file, audio, subtitles, and playlist entry stay unchanged. In Linux, Coffee tries Vulkan processing and VA-API encoding when supported, and falls back to CPU conversion if needed. The saved track is reused on future opens of the same file. Copies live in `coffee/prepared` in your user cache directory (typically `~/.cache` on Linux, `~/Library/Caches` on macOS, or `%LOCALAPPDATA%` on Windows).
+The prepared MP4 is saved beside its source, using the source’s name with `-coffee` added: `Holiday.mov` becomes `Holiday-coffee.mp4`. Coffee adds a number if necessary to avoid overwriting an existing file. The source folder must be writable to make a new copy. If a prepared copy from Coffee 1.1 or earlier is still in the old cache, **Save copy** saves it beside the original without re-encoding it.
+
+Select **Play prepared** to use the saved video track, or **Use original** to switch back. The MP4 itself is video-only; during playback Coffee keeps the original audio, subtitles, and playlist entry. On Linux, Coffee tries Vulkan processing and VA-API encoding when supported, and falls back to CPU conversion if needed. Coffee reuses a prepared MP4 that matches the current original.
 
 ## Supported media
 

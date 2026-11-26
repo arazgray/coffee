@@ -812,6 +812,9 @@ impl App {
         {
             return Err("The prepared video isn’t ready yet.".into());
         }
+        if !target.still_matches() {
+            return Err("The prepared copy or original changed. Reopen the original video.".into());
+        }
         let original = self
             .mpv
             .get("current-tracks/video/id")
@@ -1961,7 +1964,13 @@ impl App {
                     .filter(|_| self.playback_health.detected())
                     .map(|target| ui::PrepareView {
                         cached: target.cached,
+                        legacy: target.legacy.is_some(),
                         playing: self.prepared_track.is_some(),
+                        file_name: target
+                            .output
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("the prepared MP4"),
                         status: prepare_status.as_ref(),
                     }),
                 caption: caption.as_deref(),

@@ -1,10 +1,10 @@
-//! Cancellable FFmpeg jobs. The cache holds video-only alternatives so mpv
-//! can keep the original audio, subtitles, chapters and playlist entry.
+//! Cancellable FFmpeg jobs. Sibling MP4s contain only the prepared video
+//! track so mpv can keep the source audio, subtitles, chapters and queue.
 use std::{
     env,
     fs::{self, File},
     hash::{DefaultHasher, Hash, Hasher},
-    io::{self, BufRead, BufReader, Read, Seek},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -83,12 +83,14 @@ impl PlaybackHealth {
 pub struct Target {
     source: PathBuf,
     pub output: PathBuf,
+    stamp: u64,
     hdr: bool,
     av1: bool,
     pub cached: bool,
+    pub legacy: Option<PathBuf>,
 }
 
-fn cache_directory() -> Option<PathBuf> {
+fn legacy_cache_directory() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let root = PathBuf::from(env::var_os("LOCALAPPDATA")?);
     #[cfg(target_os = "macos")]
@@ -111,6 +113,111 @@ fn fingerprint(source: &Path) -> Option<u64> {
     Some(hash.finish())
 }
 
+fn source_stamp(source: &Path) -> Option<u64> {
+    let meta = source.metadata().ok()?;
+    if !meta.is_file() || meta.len() == 0 {
+        return None;
+    }
+    let mut hash = DefaultHasher::new();
+    // Unlike the old cache key, this stays valid when a folder and its
+    // side-by-side videos are moved together without changing the files.
+    (source.file_name()?, meta.len(), meta.modified().ok()?).hash(&mut hash);
+    Some(hash.finish())
+}
+
+// A conforming, ignorable MP4 uuid atom at EOF identifies our own copies
+// without running ffprobe or creating a sidecar. The final 8 bytes bind
+// the copy to a specific revision of its source file.
+const BOX_HEADER: [u8; 24] = *b"\x00\x00\x00\x20uuidCoffeeSmooth1.2!";
+const BOX_LEN: usize = BOX_HEADER.len() + 8;
+
+fn prepared_marker(path: &Path) -> Option<u64> {
+    let meta = path.symlink_metadata().ok()?;
+    if !meta.is_file() || meta.len() < (BOX_LEN + 8) as u64 {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let mut header = [0; 8];
+    file.read_exact(&mut header).ok()?;
+    if &header[4..] != b"ftyp" {
+        return None;
+    }
+    let mut marker = [0; BOX_LEN];
+    file.seek(SeekFrom::End(-(BOX_LEN as i64))).ok()?;
+    file.read_exact(&mut marker).ok()?;
+    (marker[..BOX_HEADER.len()] == BOX_HEADER)
+        .then(|| u64::from_be_bytes(marker[BOX_HEADER.len()..].try_into().unwrap()))
+}
+
+fn stamp_output(path: &Path, stamp: u64) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new().read(true).append(true).open(path)?;
+    let mut header = [0; 8];
+    file.rewind()?;
+    file.read_exact(&mut header)?;
+    if &header[4..] != b"ftyp" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "FFmpeg did not produce an MP4",
+        ));
+    }
+    file.write_all(&BOX_HEADER)?;
+    file.write_all(&stamp.to_be_bytes())
+}
+
+fn sibling_output(path: &Path, stamp: u64) -> Option<(PathBuf, bool)> {
+    let stem = path.file_stem()?;
+    let directory = path.parent()?;
+    // Inspect existing numbered names even if an earlier copy was removed.
+    // Typically this needs only one directory scan plus a single file probe.
+    let base = stem.to_str()?;
+    let mut occupied = fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let tail = name.to_str()?.strip_prefix(base)?.strip_prefix("-coffee")?;
+            let index = if tail == ".mp4" {
+                1
+            } else {
+                let n: u32 = tail.strip_prefix('-')?.strip_suffix(".mp4")?.parse().ok()?;
+                if n < 2 {
+                    return None;
+                }
+                n
+            };
+            Some((index, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    occupied.sort_unstable_by_key(|(n, _)| *n);
+    if let Some((_, existing)) = occupied
+        .iter()
+        .find(|(_, other)| prepared_marker(other) == Some(stamp))
+    {
+        return Some((existing.clone(), true));
+    }
+    // Probe the actual candidate names as well: on a case-insensitive
+    // filesystem the collision might use different capitalization.
+    for index in 1..=10000 {
+        let suffix = if index == 1 {
+            "-coffee.mp4".into()
+        } else {
+            format!("-coffee-{index}.mp4")
+        };
+        let mut name = stem.to_owned();
+        name.push(suffix);
+        let candidate = directory.join(name);
+        match candidate.symlink_metadata() {
+            Ok(_) if prepared_marker(&candidate) == Some(stamp) => return Some((candidate, true)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Some((candidate, false));
+            }
+            Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
+    None
+}
+
 impl Target {
     pub fn local(path: &str, hdr: bool, av1: bool) -> Option<Self> {
         let path = Path::new(path);
@@ -118,16 +225,34 @@ impl Target {
             return None;
         }
         let source = path.canonicalize().ok()?;
-        let key = fingerprint(&source)?;
-        let output = cache_directory()?.join(format!("v1-{key:016x}.mkv"));
-        let cached = output.metadata().is_ok_and(|m| m.is_file() && m.len() > 0);
+        if prepared_marker(&source).is_some() {
+            return None; // A prepared MP4 is already the light video track.
+        }
+        let stamp = source_stamp(&source)?;
+        let (output, cached) = sibling_output(path, stamp)?;
+        let legacy = (!cached)
+            .then(|| {
+                let key = fingerprint(&source)?;
+                let file = legacy_cache_directory()?.join(format!("v1-{key:016x}.mkv"));
+                file.symlink_metadata()
+                    .is_ok_and(|m| m.is_file() && m.len() > 0)
+                    .then_some(file)
+            })
+            .flatten();
         Some(Self {
             source,
             output,
+            stamp,
             hdr,
             av1,
             cached,
+            legacy,
         })
+    }
+
+    pub fn still_matches(&self) -> bool {
+        source_stamp(&self.source) == Some(self.stamp)
+            && prepared_marker(&self.output) == Some(self.stamp)
     }
 }
 
@@ -135,6 +260,7 @@ impl Target {
 pub enum Method {
     Gpu,
     Cpu,
+    Reuse,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -172,7 +298,9 @@ pub struct Job {
 
 impl Job {
     pub fn start(target: Target, total: f64, vaapi: Option<PathBuf>) -> Result<Self, String> {
-        let method = if vaapi.is_some() {
+        let method = if target.legacy.is_some() {
+            Method::Reuse
+        } else if vaapi.is_some() {
             Method::Gpu
         } else {
             Method::Cpu
@@ -253,7 +381,7 @@ fn ffmpeg() -> Command {
     cmd
 }
 
-fn command(target: &Target, output: &Path, vaapi: Option<&Path>) -> Command {
+fn progress_command() -> Command {
     let mut cmd = ffmpeg();
     cmd.args([
         "-nostdin",
@@ -269,6 +397,30 @@ fn command(target: &Target, output: &Path, vaapi: Option<&Path>) -> Command {
         "-filter_threads",
         "2",
     ]);
+    cmd
+}
+
+fn video_only(cmd: &mut Command, source: &Path) {
+    cmd.arg("-i").arg(source).args([
+        "-map",
+        "0:V:0",
+        "-an",
+        "-sn",
+        "-dn",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+    ]);
+}
+
+fn mp4(cmd: &mut Command, output: &Path) {
+    cmd.args(["-movflags", "+faststart", "-f", "mp4"])
+        .arg(output);
+}
+
+fn command(target: &Target, output: &Path, vaapi: Option<&Path>) -> Command {
+    let mut cmd = progress_command();
     if let Some(device) = vaapi {
         cmd.arg("-vaapi_device").arg(device);
     }
@@ -281,19 +433,8 @@ fn command(target: &Target, output: &Path, vaapi: Option<&Path>) -> Command {
     if target.av1 {
         cmd.args(["-c:v", "libdav1d"]);
     }
-    cmd.arg("-i").arg(&target.source).args([
-        "-map",
-        "0:V:0",
-        "-an",
-        "-sn",
-        "-dn",
-        "-map_metadata",
-        "-1",
-        "-map_chapters",
-        "-1",
-        "-fps_mode",
-        "passthrough",
-    ]);
+    video_only(&mut cmd, &target.source);
+    cmd.args(["-fps_mode", "passthrough"]);
     if vaapi.is_some() {
         let vf = format!(
             "libplacebo={MAX_SIZE}:format=nv12:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:tonemapping=hable:peak_detect=0:downscaler=bilinear:sigmoid=0,format=nv12,hwupload"
@@ -309,7 +450,7 @@ fn command(target: &Target, output: &Path, vaapi: Option<&Path>) -> Command {
             "-vf", &vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2",
         ]);
     }
-    cmd.args(["-f", "matroska"]).arg(output);
+    mp4(&mut cmd, output);
     cmd
 }
 
@@ -320,69 +461,100 @@ fn prepare(
     status: &Mutex<Status>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let original = fingerprint(&target.source).ok_or("The original video is unavailable.")?;
-    let dir = target.output.parent().ok_or("No cache directory.")?;
-    fs::create_dir_all(dir)
-        .map_err(|e| format!("Couldn’t create the prepared-video cache: {e}"))?;
+    if source_stamp(&target.source) != Some(target.stamp) {
+        return Err("The original video changed. Reopen it to prepare this version.".into());
+    }
+    let dir = target
+        .output
+        .parent()
+        .ok_or("No folder for the prepared video.")?;
     let temp = tempfile::Builder::new()
-        .prefix(".preparing-")
-        .suffix(".mkv")
+        .prefix(".coffee-preparing-")
+        .suffix(".mp4")
         .tempfile_in(dir)
-        .map_err(|e| format!("Couldn’t create a prepared video: {e}"))?
+        .map_err(|e| format!("Couldn’t write next to the original video: {e}"))?
         .into_temp_path();
-    let mut variant = target.clone();
-    let mut device = vaapi;
-    loop {
-        let result = convert(&variant, &temp, total, device, status, cancel);
-        match result {
-            Ok(()) => break,
-            Err(e) if cancel.load(Ordering::Relaxed) => return Err(e),
-            Err(e) if variant.av1 && e.contains("Unknown decoder") => variant.av1 = false,
-            Err(e) if device.is_some() && !e.starts_with("Install FFmpeg") => device = None,
-            Err(e) => return Err(e),
+    let reused = if let Some(legacy) = &target.legacy {
+        let mut cmd = progress_command();
+        video_only(&mut cmd, legacy);
+        cmd.args(["-c:v", "copy"]);
+        mp4(&mut cmd, &temp);
+        match convert(cmd, total, Method::Reuse, status, cancel) {
+            Ok(()) => true,
+            Err(e) if cancel.load(Ordering::Relaxed) || e.starts_with("Install FFmpeg") => {
+                return Err(e);
+            }
+            Err(_) => false, // The legacy cache is optional; encode the source if unreadable.
+        }
+    } else {
+        false
+    };
+    if !reused {
+        let mut variant = target.clone();
+        let mut device = vaapi;
+        loop {
+            let method = if device.is_some() {
+                Method::Gpu
+            } else {
+                Method::Cpu
+            };
+            let result = convert(
+                command(&variant, &temp, device),
+                total,
+                method,
+                status,
+                cancel,
+            );
+            match result {
+                Ok(()) => break,
+                Err(e) if cancel.load(Ordering::Relaxed) => return Err(e),
+                Err(e) if variant.av1 && e.contains("Unknown decoder") => variant.av1 = false,
+                Err(e) if device.is_some() && !e.starts_with("Install FFmpeg") => device = None,
+                Err(e) => return Err(e),
+            }
         }
     }
     if cancel.load(Ordering::Relaxed) {
         return Err("Cancelled".into());
     }
-    if fingerprint(&target.source) != Some(original) {
+    if source_stamp(&target.source) != Some(target.stamp) {
         return Err("The original video changed during preparation.".into());
     }
-    if !temp.metadata().is_ok_and(|meta| meta.len() > 0) {
-        return Err("FFmpeg did not produce a video.".into());
-    }
+    stamp_output(&temp, target.stamp)
+        .map_err(|e| format!("Couldn’t finish the prepared MP4: {e}"))?;
     match temp.persist_noclobber(&target.output) {
         Ok(()) => Ok(()),
-        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists && target.output.is_file() => {
-            Ok(())
+        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => {
+            if prepared_marker(&target.output) == Some(target.stamp) {
+                Ok(())
+            } else {
+                Err(
+                    "That output name was taken. Reopen the original to choose a different name."
+                        .into(),
+                )
+            }
         }
         Err(e) => Err(format!("Couldn’t save the prepared copy: {}", e.error)),
     }
 }
 
 fn convert(
-    target: &Target,
-    output: &Path,
+    mut command: Command,
     total: f64,
-    vaapi: Option<&Path>,
+    method: Method,
     status: &Mutex<Status>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("Cancelled".into());
     }
-    let method = if vaapi.is_some() {
-        Method::Gpu
-    } else {
-        Method::Cpu
-    };
     let mut progress = Progress {
         total,
         ..Progress::default()
     };
     *status.lock().unwrap() = Status::Running(method, progress);
     let mut errors: File = tempfile::tempfile().map_err(|e| e.to_string())?;
-    let mut child = command(target, output, vaapi)
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(errors.try_clone().map_err(|e| e.to_string())?)
@@ -515,10 +687,72 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().to_path_buf();
         assert_eq!(fingerprint(&path), None);
-        use std::io::Write;
         file.write_all(b"original").unwrap();
         let first = fingerprint(&path).unwrap();
         file.write_all(b"changed").unwrap();
         assert_ne!(fingerprint(&path), Some(first));
+    }
+
+    fn fake_mp4(path: &Path, stamp: u64) {
+        fs::write(path, b"\x00\x00\x00\x10ftypisom0000").unwrap();
+        stamp_output(path, stamp).unwrap();
+    }
+
+    #[test]
+    fn every_source_uses_its_own_stem_and_the_same_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        for (input, output) in [
+            ("sample.mp4", "sample-coffee.mp4"),
+            ("Holiday.mov", "Holiday-coffee.mp4"),
+            ("Episode 2.1080p.webm", "Episode 2.1080p-coffee.mp4"),
+            ("فیلم.mkv", "فیلم-coffee.mp4"),
+        ] {
+            let source = temp.path().join(input);
+            fs::write(&source, b"source").unwrap();
+            let t = Target::local(source.to_str().unwrap(), false, false).unwrap();
+            assert_eq!(t.output, temp.path().join(output));
+            assert!(!t.cached);
+        }
+    }
+
+    #[test]
+    fn sibling_reuse_skips_unrelated_files_and_never_reuses_a_stale_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("a.webm");
+        let first = temp.path().join("a-coffee.mp4");
+        let second = temp.path().join("a-coffee-2.mp4");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&first, b"unrelated file").unwrap();
+        let key = source_stamp(&source).unwrap();
+        assert_eq!(sibling_output(&source, key), Some((second.clone(), false)));
+        fake_mp4(&second, key);
+        assert_eq!(sibling_output(&source, key), Some((second.clone(), true)));
+        assert_eq!(fs::read(&first).unwrap(), b"unrelated file");
+        fs::remove_file(&first).unwrap();
+        assert_eq!(sibling_output(&source, key), Some((second.clone(), true)));
+        let copy = Target::local(second.to_str().unwrap(), false, false);
+        assert!(copy.is_none(), "prepared files do not get prepared again");
+
+        fs::write(&source, b"replacement content").unwrap();
+        let changed = Target::local(source.to_str().unwrap(), false, false).unwrap();
+        assert!(!changed.cached);
+        assert_eq!(changed.output, first);
+        assert_eq!(prepared_marker(&second), Some(key));
+    }
+
+    #[test]
+    fn stamped_copy_still_matches_after_moving_its_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let from = root.path().join("from");
+        let to = root.path().join("to");
+        fs::create_dir(&from).unwrap();
+        let source = from.join("track.avi");
+        fs::write(&source, b"source").unwrap();
+        let target = Target::local(source.to_str().unwrap(), false, false).unwrap();
+        fake_mp4(&target.output, target.stamp);
+        assert!(target.still_matches());
+        fs::rename(from, &to).unwrap();
+        let moved = Target::local(to.join("track.avi").to_str().unwrap(), false, false).unwrap();
+        assert!(moved.cached && moved.still_matches());
     }
 }

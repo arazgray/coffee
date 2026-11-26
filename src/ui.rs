@@ -409,7 +409,9 @@ pub struct StreamView<'a> {
 #[derive(Clone, Copy)]
 pub struct PrepareView<'a> {
     pub cached: bool,
+    pub legacy: bool,
     pub playing: bool,
+    pub file_name: &'a str,
     pub status: Option<&'a Status>,
 }
 
@@ -779,11 +781,17 @@ fn prepare_panel(f: &mut Frame, v: View<'_>, prepare: PrepareView<'_>) {
     let base = pixels(if running.is_some() { 103 } else { 77 });
     let panel_room = (v.h - bottom_height(v) - 51).max(base);
     let line_width = ((width - pixels(24)) / pixels(7)).max(8) as usize;
+    let filename = &format!("MP4: {}", prepare.file_name);
     let (messages, action, label, primary): (&[&str], _, _, _) = match prepare.status {
-        Some(Status::Running(..)) => (
+        Some(Status::Running(method, _)) => (
             &[
-                "Making a reusable 1080p SDR copy.",
-                "The original is untouched.",
+                if *method == Method::Reuse {
+                    "Saving your previous copy as an MP4."
+                } else {
+                    "Making a reusable 1080p SDR copy."
+                },
+                "Saving next to the original.",
+                filename,
             ],
             Action::CancelPreparation,
             "Cancel",
@@ -801,6 +809,7 @@ fn prepare_panel(f: &mut Frame, v: View<'_>, prepare: PrepareView<'_>) {
         _ if prepare.ready() => (
             &[
                 "The 1080p SDR copy is ready.",
+                filename,
                 "The original audio and subtitles are kept.",
             ],
             Action::PlayPrepared,
@@ -819,9 +828,20 @@ fn prepare_panel(f: &mut Frame, v: View<'_>, prepare: PrepareView<'_>) {
             "Start",
             true,
         ),
+        _ if prepare.legacy => (
+            &[
+                "Save your previous copy next to the original, without re-encoding.",
+                filename,
+            ],
+            Action::StartPreparation,
+            "Save copy",
+            true,
+        ),
         _ => (
             &[
                 "Makes a reusable 1080p SDR copy for smoother playback.",
+                "Saves the MP4 next to the original.",
+                filename,
                 "Uses the GPU when available and pauses this video while it works.",
                 "Your original stays untouched.",
             ],
@@ -908,10 +928,10 @@ fn prepare_panel(f: &mut Frame, v: View<'_>, prepare: PrepareView<'_>) {
         };
         let status = format!(
             "{} · {}% · {timing}",
-            if method == Method::Gpu {
-                "GPU-assisted"
-            } else {
-                "CPU"
+            match method {
+                Method::Gpu => "GPU-assisted",
+                Method::Cpu => "CPU",
+                Method::Reuse => "Copying",
             },
             (fraction * 100.0).floor().min(99.0) as u8,
         );
@@ -2185,7 +2205,9 @@ mod tests {
         ] {
             v.prepare = Some(PrepareView {
                 cached: false,
+                legacy: false,
                 playing: false,
+                file_name: "sample-coffee.mp4",
                 status,
             });
             let frame = draw(v);
