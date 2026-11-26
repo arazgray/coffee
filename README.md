@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 1.4** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.4/SHA256SUMS.txt)
+**Coffee 1.5** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.5/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-media-player-1.4.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-media-player-1.4.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.4/coffee-1.4.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-media-player-1.5.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-media-player-1.5.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.5/coffee-1.5.0-windows-x86_64.zip) |
 
 ## Install
 

@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SIZE: (usize, usize) = (192, 108);
+const SIZE: (usize, usize) = (256, 144);
 const BYTES: usize = SIZE.0 * SIZE.1 * 4;
 const INDEX_LIMIT: usize = 320;
 const DEMAND_LIMIT: usize = 24;
@@ -33,8 +33,8 @@ impl Plan {
         if !duration.is_finite() || duration <= 0.0 {
             return None;
         }
-        // Half-second resolution for short videos; keep the whole index
-        // under 26 MiB even for a feature-length film.
+        // Half-second resolution for short videos; cap the index at
+        // 45 MiB even for a feature-length film.
         let interval = ((duration / (INDEX_LIMIT - 1) as f64) * 2.0)
             .ceil()
             .max(1.0)
@@ -362,8 +362,9 @@ fn bucket(seconds: f64) -> u64 {
 }
 
 fn resize_filter(hdr: bool) -> String {
-    let scale = "scale=192:108:force_original_aspect_ratio=decrease:force_divisible_by=2";
-    let finish = "format=bgra,pad=192:108:(ow-iw)/2:(oh-ih)/2,setsar=1";
+    let (w, h) = SIZE;
+    let scale = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2");
+    let finish = format!("format=bgra,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1");
     if hdr {
         format!("{scale},{},{finish}", prepare::HDR_CONVERT)
     } else {

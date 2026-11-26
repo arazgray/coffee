@@ -18,6 +18,8 @@ const MUTED: &str = "BDB0A6";
 const ACCENT: &str = "EDAA7B";
 const OPEN_LEFT: i32 = 10;
 const OPEN_WIDTH: i32 = 85;
+const PLAYBACK_WIDTH: i32 = 312;
+const SEEK_PREVIEW_WIDTH: i32 = 400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
@@ -525,7 +527,9 @@ pub fn seek_hover(dimensions: (i32, i32), point: (i32, i32)) -> Option<SeekHover
         return None;
     }
     let label_y = bar_y - 30;
-    let width = (w - 16).min(200).min(((label_y - 8) * 16 / 9) + 8);
+    let width = (w - 16)
+        .min(SEEK_PREVIEW_WIDTH)
+        .min(((label_y - 8) * 16 / 9) + 8);
     let left = (logical.0.round() as i32 - width / 2).clamp(8, w - width - 8);
     let image_height = (width - 8) * 9 / 16;
     let image = Rect::new(left + 4, label_y - image_height, width - 8, image_height);
@@ -1532,7 +1536,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
         Menu::Open => (v.w - OPEN_LEFT - 10).min(pixels(212)),
         Menu::Slideshow => (v.w - 20).min(pixels(247)),
         Menu::Context => (v.w - 16).min(pixels(200)),
-        Menu::Playback => (v.w - pixels(20)).min(pixels(472)),
+        Menu::Playback => (v.w - pixels(20)).min(pixels(PLAYBACK_WIDTH)),
         _ => (v.w - pixels(20)).min(pixels(390)),
     };
     let mut rows = Vec::new();
@@ -1674,7 +1678,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
         Menu::Playback => {
             if matches!(v.media.kind, Kind::Video | Kind::Music) {
                 rows.push(note(if v.seekable {
-                    "Speed · reverse to −64× / forward to +64×"
+                    "Speed · −64× reverse / +64× forward"
                 } else {
                     "Speed · reverse needs a seekable file"
                 }));
@@ -2415,7 +2419,7 @@ mod tests {
             .iter()
             .find(|(_, action)| *action == Action::Scroll(0))
             .unwrap();
-        assert_eq!(bounds.w, pixels(472));
+        assert_eq!(bounds.w, pixels(PLAYBACK_WIDTH));
         for (label, menu) in [
             ("Video decoder", Menu::Decoder),
             ("Rendering quality", Menu::Rendering),
@@ -2489,6 +2493,12 @@ mod tests {
                 assert_eq!(frame.at(point), Action::Seek(hover.fraction));
                 let (x, y, image_w, image_h) = hover.image_bounds;
                 assert!(x >= 0 && x + image_w <= width && y >= 0 && y + image_h < v.h);
+                if width == 1100 {
+                    assert_eq!(hover.box_rect.w, 400);
+                    assert!(hover.image.w >= 2 * 192 && hover.image.h >= 2 * 108);
+                } else {
+                    assert!(hover.box_rect.w < 400);
+                }
             }
             assert!(
                 seek_hover((width, v.h), frame.layout.physical_point((w / 2, bar + 33))).is_none()
