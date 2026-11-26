@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 0.4.0** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v0.4.0/SHA256SUMS.txt)
+**Coffee 1.0** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.0/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-media-player-0.4.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-media-player-0.4.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-media-player-1.0.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-media-player-1.0.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.0/coffee-1.0.0-windows-x86_64.zip) |
 
 ## Install
 
@@ -41,6 +41,8 @@ Coffee requires **libmpv 0.41 or newer**.
 
 To build from source, install Rust and run `cargo test --locked` and `cargo build --release --locked`. On Linux, `sh install.sh` installs the result for the current user. `coffee --smoke-test path/to/media` checks opening and decoding a file without creating a player window. `COFFEE_LIBMPV` can point to a different libmpv installation.
 
+**Prepare** also needs the FFmpeg command-line program with `libx264` and `zscale` for the software path. Install `ffmpeg` from your Linux package manager, `brew install ffmpeg` on macOS, or `pacman -S mingw-w64-ucrt-x86_64-ffmpeg` in MSYS2 **UCRT64** on Windows. Set `COFFEE_FFMPEG` to use a different executable.
+
 ## Playback
 
 - Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
@@ -50,9 +52,16 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 - **Slideshow**, beside **Live** in the playback area, opens a dropdown with optional music and a **Play** button. Play enters fullscreen and crossfades to the next photo every five seconds, looping through the folder. Move the mouse to reveal the hidden controls, or press **Esc** to stop the slideshow and its music.
 - The photo bar has **Fit** (show the entire image), **Fill** (crop to fill the window), and **100%** (one image pixel per display pixel). Drag across the photo to pan along any cropped axis. The selected zoom carries over to the next photo.
 - **Open Streams** uses the player's own dark URL dialog. It accepts HLS, DASH, and direct HTTP(S) URLs. Paste with **Ctrl+V** (or **Command+V** where supported).
+- The **Subtitles** panel has an **LTR | RTL** switch for text captions. Select the active direction again to return to the track’s default rendering. Forced direction uses plain text; it does not alter image-based subtitles. The **Encoding** dropdown can reload an external text track with UTF-8, Windows-1256 (Arabic), or another common encoding. Subtitles move above the playback bar when it appears.
 - The playlist supports `.coffee.json` and older `.kahve.json` files, plus `.m3u`/`.m3u8` import. Playlists refer to local paths and URLs; they don't copy media.
 - Double-click a photo or video to toggle fullscreen. Double-click open space on either control bar to maximize or restore. Right-click for playback actions and the current item's containing folder or playlist entry.
 - The player and stream dialog are always dark. On KDE Plasma 6, Coffee adds a dark window-frame rule scoped to `coffee`. Other Linux compositors may control their own decorations. Coffee requests a dark frame on Windows and macOS.
+
+## Prepare for smooth playback
+
+Open a local video and click **Prepare** in the upper-right corner (where **Live** appears for photos). Coffee pauses the video and makes a reusable H.264 video track at up to 1080p, keeping the frame rate and converting HDR to SDR. The panel shows progress and an ETA; you can close the panel without stopping the job or click **Cancel** to discard the partial copy. Switching to another item also cancels preparation.
+
+Select **Play prepared** to use the saved track, or **Use original** to switch back. Your source file, audio, subtitles, and playlist entry stay unchanged. In Linux, Coffee tries Vulkan processing and VA-API encoding when supported, and falls back to CPU conversion if needed. The saved track is reused on future opens of the same file. Copies live in `coffee/prepared` in your user cache directory (typically `~/.cache` on Linux, `~/Library/Caches` on macOS, or `%LOCALAPPDATA%` on Windows).
 
 ## Supported media
 

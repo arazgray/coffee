@@ -89,6 +89,13 @@ fn display_gpu(drm: &Path, gpus: &[VulkanGpu<'_>]) -> Option<String> {
 }
 
 impl Devices {
+    pub fn preparation_device(&self) -> Option<PathBuf> {
+        self.decoders.iter().find_map(|gpu| match &gpu.backend {
+            Backend::Vaapi { device, .. } => Some(device.clone()),
+            Backend::Nvdec => None,
+        })
+    }
+
     pub fn discover() -> Self {
         let listing = Command::new("vulkaninfo")
             .arg("--summary")

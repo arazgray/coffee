@@ -1,7 +1,9 @@
 use crate::{
     gpu::{DecodeChoice, DecoderGpu},
+    prepare::{Method, Status},
     scale::{PERCENT, pixels},
     state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, is_stream, time},
+    subtitles::{Direction, ENCODINGS, Encoding},
 };
 use std::fmt::Write;
 
@@ -20,10 +22,12 @@ const OPEN_WIDTH: i32 = 85;
 pub enum Menu {
     Open,
     Slideshow,
+    Prepare,
     Context,
     Playlist,
     Audio,
     Subtitles,
+    SubtitleEncoding,
     Settings,
     Decoder,
     Rendering,
@@ -57,6 +61,10 @@ pub enum Action {
     Previous,
     Next,
     LivePhoto,
+    StartPreparation,
+    CancelPreparation,
+    PlayPrepared,
+    PlayOriginal,
     PhotoZoom(PhotoZoom),
     SlideshowMusic,
     ClearSlideshowMusic,
@@ -71,6 +79,8 @@ pub enum Action {
     ToggleSubtitles,
     Audio(i64),
     Subtitles(i64),
+    SubtitleDirection(Direction),
+    SubtitleEncoding(Encoding),
     Speed(&'static str),
     Quality(&'static str),
     Hdr(Hdr),
@@ -394,6 +404,19 @@ pub struct StreamView<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub struct PrepareView<'a> {
+    pub cached: bool,
+    pub playing: bool,
+    pub status: Option<&'a Status>,
+}
+
+impl PrepareView<'_> {
+    fn ready(self) -> bool {
+        self.cached || matches!(self.status, Some(Status::Ready))
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct View<'a> {
     pub w: i32,
     pub h: i32,
@@ -402,6 +425,10 @@ pub struct View<'a> {
     pub photo_position: Option<(usize, usize)>,
     pub live_available: bool,
     pub live_playing: bool,
+    pub prepare: Option<PrepareView<'a>>,
+    pub caption: Option<&'a str>,
+    pub subtitle_direction: Option<Direction>,
+    pub subtitle_encoding: Encoding,
     pub photo_zoom: PhotoZoom,
     pub slideshow_playing: bool,
     pub slideshow_music: Option<&'a str>,
@@ -438,11 +465,22 @@ const COMPACT_PHOTO_WIDTH: i32 = 320;
 fn bottom_height(view: View<'_>) -> i32 {
     if view.media.kind == Kind::Image {
         if view.w < COMPACT_PHOTO_WIDTH { 77 } else { 44 }
-    } else if view.w < 670 {
-        91
     } else {
-        62
+        video_bar_height(view.w)
     }
+}
+
+fn video_bar_height(w: i32) -> i32 {
+    if w < 670 { 91 } else { 62 }
+}
+
+fn subtitle_lift(w: i32, controls: bool) -> i32 {
+    if controls { video_bar_height(w) + 6 } else { 0 }
+}
+
+pub fn subtitle_position((w, h): (i32, i32), controls: bool) -> u8 {
+    let (w, h) = Layout::new(w, h).logical;
+    ((h - subtitle_lift(w, controls)).max(0) * 100 / h) as u8
 }
 
 pub fn draw(mut v: View<'_>) -> Frame {
@@ -455,6 +493,17 @@ pub fn draw(mut v: View<'_>) -> Frame {
     let (w, h) = (v.w, v.h);
     if w < 120 || h < 120 {
         return f;
+    }
+    if v.media.kind == Kind::Video
+        && let Some(text) = v.caption
+    {
+        let x = w / 2;
+        let y = (h - (h / 32).max(10) - subtitle_lift(w, v.controls_opacity > 0)).max(h / 4);
+        let size = (h / 19).clamp(16, 56);
+        let _ = writeln!(
+            f.ass,
+            "{{\\an2\\pos({x},{y})\\fe-1\\fnDejaVu Sans\\fs{size}\\bord2\\shad0\\1c&HFFFFFF&\\3c&H000000&}}{text}",
+        );
     }
     let empty = v.media.kind == Kind::Empty;
     if empty {
@@ -576,6 +625,24 @@ pub fn draw(mut v: View<'_>) -> Frame {
         if v.slideshow_playing {
             photo_actions(&mut f, v);
         }
+        if let Some(prepare) = v.prepare {
+            let label = match prepare.status {
+                Some(Status::Running(_, p)) => p
+                    .fraction()
+                    .map(|part| format!("Preparing {}%", (part * 100.0).floor().min(99.0) as u8))
+                    .unwrap_or_else(|| "Preparing…".into()),
+                _ if prepare.ready() => "Prepared".into(),
+                _ => "Prepare".into(),
+            };
+            f.labeled_button(
+                prepare_anchor(v),
+                &label,
+                (None, Some("ChevronDown")),
+                v,
+                (v.menu == Some(Menu::Prepare), true),
+                Action::Menu(Menu::Prepare),
+            );
+        }
         f.opacity = 255;
         f.interactive = true;
     }
@@ -607,7 +674,13 @@ pub fn draw(mut v: View<'_>) -> Frame {
     }
     if let Some(menu) = v.menu {
         f.panel_style = true;
-        menu_panel(&mut f, v, menu);
+        if menu == Menu::Prepare {
+            if let Some(prepare) = v.prepare {
+                prepare_panel(&mut f, v, prepare);
+            }
+        } else {
+            menu_panel(&mut f, v, menu);
+        }
         f.panel_style = false;
     }
     if !v.toast.is_empty() {
@@ -682,6 +755,200 @@ fn slideshow_anchor(v: View<'_>) -> Rect {
     };
     let width = (edge - 10).min(137);
     Rect::new(edge - width, y, width, 32)
+}
+
+fn prepare_anchor(v: View<'_>) -> Rect {
+    let edge = v.w - 13;
+    let width = (edge - 10).min(137);
+    Rect::new(edge - width, 57, width, 32)
+}
+
+fn prepare_panel(f: &mut Frame, v: View<'_>, prepare: PrepareView<'_>) {
+    let width = (v.w - 20).min(pixels(380));
+    let x = v.w - width - 10;
+    let running = match prepare.status {
+        Some(Status::Running(method, progress)) => Some((*method, *progress)),
+        _ => None,
+    };
+    let base = pixels(if running.is_some() { 103 } else { 77 });
+    let panel_room = (v.h - bottom_height(v) - 51).max(base);
+    let line_width = ((width - pixels(24)) / pixels(7)).max(8) as usize;
+    let (messages, action, label, primary): (&[&str], _, _, _) = match prepare.status {
+        Some(Status::Running(..)) => (
+            &[
+                "Making a reusable 1080p SDR copy.",
+                "The original is untouched.",
+            ],
+            Action::CancelPreparation,
+            "Cancel",
+            false,
+        ),
+        _ if prepare.playing => (
+            &[
+                "Playing the 1080p SDR copy.",
+                "Audio and subtitles are still from the original.",
+            ],
+            Action::PlayOriginal,
+            "Use original",
+            false,
+        ),
+        _ if prepare.ready() => (
+            &[
+                "The 1080p SDR copy is ready.",
+                "The original audio and subtitles are kept.",
+            ],
+            Action::PlayPrepared,
+            "Play prepared",
+            true,
+        ),
+        Some(Status::Failed(error)) => (
+            &["Couldn’t prepare this video.", error],
+            Action::StartPreparation,
+            "Retry",
+            true,
+        ),
+        Some(Status::Cancelled) => (
+            &["Preparation canceled. No copy was saved."],
+            Action::StartPreparation,
+            "Start",
+            true,
+        ),
+        _ => (
+            &[
+                "Makes a reusable 1080p SDR copy for smoother playback.",
+                "Uses the GPU when available and pauses this video while it works.",
+                "Your original stays untouched.",
+            ],
+            Action::StartPreparation,
+            "Start",
+            true,
+        ),
+    };
+    let line_height = pixels(15);
+    let mut lines = Vec::new();
+    for message in messages {
+        let mut line = String::new();
+        for word in message.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + word.chars().count() + 1 > line_width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    let rows = ((panel_room - base) / line_height).clamp(0, 7) as usize;
+    let clipped = lines.len() > rows;
+    lines.truncate(rows);
+    if clipped && let Some(last) = lines.last_mut() {
+        last.push('…');
+    }
+    let height = base + lines.len() as i32 * line_height;
+    let y = (prepare_anchor(v).y + 37).min((v.h - bottom_height(v) - height - 4).max(48));
+    f.rect(Rect::new(x, y, width, height), pixels(9), LINE, 0);
+    f.rect(
+        Rect::new(x + 1, y + 1, width - 2, height - 2),
+        pixels(8),
+        PANEL,
+        0,
+    );
+    f.hit(Rect::new(x, y, width, height), Action::Scroll(0));
+    f.text(
+        x + pixels(12),
+        y + pixels(11),
+        pixels(10),
+        7,
+        ACCENT,
+        true,
+        &shorten(
+            "PREPARE SMOOTH PLAYBACK",
+            ((width - pixels(34)) / pixels(6)).max(7) as usize,
+        ),
+    );
+    f.icon_button(
+        Rect::new(x + width - pixels(25), y + 2, pixels(23), pixels(23)),
+        "X",
+        v,
+        false,
+        true,
+        Action::Escape,
+    );
+    for (i, line) in lines.iter().enumerate() {
+        f.text(
+            x + pixels(12),
+            y + pixels(31) + i as i32 * line_height,
+            pixels(12),
+            7,
+            MUTED,
+            false,
+            &shorten(line, line_width),
+        );
+    }
+    if let Some((method, progress)) = running {
+        let left = x + pixels(12);
+        let status_y = y + height - pixels(67);
+        let bar_w = width - pixels(24);
+        let fraction = progress.fraction().unwrap_or_default();
+        let timing = if fraction >= 0.995 {
+            "Finishing…".into()
+        } else if let Some(eta) = progress.eta() {
+            format!("ETA {}", time(eta))
+        } else {
+            "Estimating ETA…".into()
+        };
+        let status = format!(
+            "{} · {}% · {timing}",
+            if method == Method::Gpu {
+                "GPU-assisted"
+            } else {
+                "CPU"
+            },
+            (fraction * 100.0).floor().min(99.0) as u8,
+        );
+        f.text(
+            left,
+            status_y,
+            pixels(11),
+            7,
+            TEXT,
+            true,
+            &shorten(&status, line_width),
+        );
+        f.rect(
+            Rect::new(left, status_y + pixels(16), bar_w, pixels(5)),
+            2,
+            LINE,
+            0,
+        );
+        f.rect(
+            Rect::new(
+                left,
+                status_y + pixels(16),
+                (bar_w as f64 * fraction).round() as i32,
+                pixels(5),
+            ),
+            2,
+            ACCENT,
+            0,
+        );
+    }
+    let button_w = pixels(115).min(width - pixels(20));
+    f.button(
+        Rect::new(
+            x + width - button_w - pixels(10),
+            y + height - pixels(37),
+            button_w,
+            pixels(29),
+        ),
+        label,
+        v,
+        (primary, true),
+        action,
+    );
 }
 
 fn stream_panel(f: &mut Frame, v: View<'_>, stream: StreamView<'_>) {
@@ -1107,6 +1374,7 @@ fn selected(label: impl Into<String>, action: Action, active: bool) -> Row {
 fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
     let mut rows = Vec::new();
     let title = match menu {
+        Menu::Prepare => return,
         Menu::Open => {
             rows.extend([
                 row("Open files…", Action::OpenFiles),
@@ -1195,6 +1463,16 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
                 rows.push(row("Add a subtitle file…", Action::OpenSubtitles));
             }
             if audio { "AUDIO TRACKS" } else { "SUBTITLES" }
+        }
+        Menu::SubtitleEncoding => {
+            rows.extend(ENCODINGS.iter().map(|&encoding| {
+                selected(
+                    encoding.label,
+                    Action::SubtitleEncoding(encoding),
+                    v.subtitle_encoding == encoding,
+                )
+            }));
+            "SUBTITLE ENCODING"
         }
         Menu::Settings => {
             for (text, speed) in [
@@ -1343,10 +1621,10 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
         _ => (v.w - pixels(20)).min(pixels(390)),
     };
     let row_height = pixels(28);
-    let footer = pixels(if matches!(menu, Menu::Playlist | Menu::Slideshow) {
-        42
-    } else {
-        8
+    let footer = pixels(match menu {
+        Menu::Playlist | Menu::Slideshow => 42,
+        Menu::Subtitles => 76,
+        _ => 8,
     });
     let available = match menu {
         Menu::Context => v.h - 16 - pixels(34) - footer,
@@ -1486,7 +1764,9 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             );
         }
     }
-    if menu == Menu::Slideshow {
+    if menu == Menu::Subtitles {
+        subtitle_options(f, v, x, y + height - footer, width);
+    } else if menu == Menu::Slideshow {
         f.labeled_button(
             Rect::new(
                 x + width - pixels(91),
@@ -1522,6 +1802,73 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             );
         }
     }
+}
+
+fn subtitle_options(f: &mut Frame, v: View<'_>, x: i32, y: i32, width: i32) {
+    let left = x + pixels(10);
+    let group = pixels(98).min(width - pixels(20));
+    let start = x + width - group - pixels(10);
+    let label = if v.subtitle_direction.is_none() {
+        "Direction · Auto"
+    } else {
+        "Direction"
+    };
+    if start - left >= pixels(66) {
+        f.text(
+            left,
+            y + pixels(18),
+            pixels(11),
+            4,
+            MUTED,
+            false,
+            &shorten(label, ((start - left) / pixels(6)) as usize),
+        );
+    }
+    let top = y + pixels(3);
+    let height = pixels(30);
+    f.rect(Rect::new(start, top, group, height), 6, LINE, 0);
+    f.rect(
+        Rect::new(start + 1, top + 1, group - 2, height - 2),
+        5,
+        "211A16",
+        0,
+    );
+    let width_ltr = (group - 2) / 2;
+    for (offset, size, direction) in [
+        (1, width_ltr, Direction::Ltr),
+        (1 + width_ltr, group - 2 - width_ltr, Direction::Rtl),
+    ] {
+        let part = Rect::new(start + offset, top + 1, size, height - 2);
+        let active = v.subtitle_direction == Some(direction);
+        if active || part.contains(v.mouse) {
+            f.rect(part, 4, if active { "3D2A1E" } else { "31251D" }, 0);
+        }
+        if offset > 1 {
+            f.rect(Rect::new(part.x, top + 6, 1, height - 12), 0, LINE, 0);
+        }
+        f.text(
+            part.x + size / 2,
+            top + height / 2,
+            pixels(12),
+            5,
+            if active { ACCENT } else { TEXT },
+            active,
+            direction.label(),
+        );
+        f.hit(part, Action::SubtitleDirection(direction));
+    }
+    let button = Rect::new(left, y + pixels(39), width - pixels(20), pixels(29));
+    f.labeled_button(
+        button,
+        &shorten(
+            &format!("Encoding: {}", v.subtitle_encoding.label),
+            ((button.w - pixels(34)) / pixels(7)).max(6) as usize,
+        ),
+        (None, Some("ChevronDown")),
+        v,
+        (false, true),
+        Action::Menu(Menu::SubtitleEncoding),
+    );
 }
 
 #[cfg(test)]
@@ -1605,6 +1952,10 @@ mod tests {
             photo_position: None,
             live_available: false,
             live_playing: false,
+            prepare: None,
+            caption: None,
+            subtitle_direction: None,
+            subtitle_encoding: ENCODINGS[0],
             photo_zoom: PhotoZoom::Fit,
             slideshow_playing: false,
             slideshow_music: None,
@@ -1634,6 +1985,69 @@ mod tests {
             speed: 1.0,
             quality: "max",
             toast: "",
+        }
+    }
+
+    #[test]
+    fn subtitle_controls_are_segmented_and_encoding_menu_selects_codepages() {
+        let media = Media {
+            kind: Kind::Video,
+            ..Default::default()
+        };
+        let mut v = video(&media);
+        v.menu = Some(Menu::Subtitles);
+        let frame = draw(v);
+        let hit = |target| frame.hits.iter().find(|(_, a)| *a == target).unwrap().0;
+        let ltr = hit(Action::SubtitleDirection(Direction::Ltr));
+        let rtl = hit(Action::SubtitleDirection(Direction::Rtl));
+        assert_eq!(ltr.x + ltr.w, rtl.x);
+        assert_eq!(ltr.y, rtl.y);
+        assert!(hit(Action::Menu(Menu::SubtitleEncoding)).y > rtl.y + rtl.h);
+        v.menu = Some(Menu::SubtitleEncoding);
+        let frame = draw(v);
+        assert!(frame.hits.iter().any(
+            |(_, action)| matches!(action, Action::SubtitleEncoding(e) if e.label.contains("1256"))
+        ));
+    }
+
+    #[test]
+    fn subtitles_rise_when_the_bar_is_visible_in_wide_and_compact_views() {
+        for (width, height) in [(1100, 660), (480, 440)] {
+            let (w, h) = Layout::new(width, height).logical;
+            let pos = subtitle_position((width, height), true);
+            assert!(i32::from(100 - pos) * h / 100 >= video_bar_height(w));
+            assert_eq!(subtitle_position((width, height), false), 100);
+        }
+    }
+
+    #[test]
+    fn prepare_panel_can_start_cancel_and_play_the_cached_copy() {
+        let media = Media {
+            kind: Kind::Video,
+            ..Default::default()
+        };
+        let mut v = video(&media);
+        let mut p = crate::prepare::Progress::default();
+        p.done = 5.0;
+        p.total = 10.0;
+        let status = Status::Running(Method::Gpu, p);
+        v.menu = Some(Menu::Prepare);
+        for (status, action) in [
+            (None, Action::StartPreparation),
+            (Some(&status), Action::CancelPreparation),
+            (Some(&Status::Ready), Action::PlayPrepared),
+        ] {
+            v.prepare = Some(PrepareView {
+                cached: false,
+                playing: false,
+                status,
+            });
+            let frame = draw(v);
+            assert!(frame.hits.iter().any(|(_, a)| *a == action));
+            if action == Action::CancelPreparation {
+                assert!(frame.osd().contains("50%"));
+                assert!(frame.osd().contains("ETA"));
+            }
         }
     }
 

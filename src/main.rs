@@ -9,8 +9,10 @@ mod library;
 mod photos;
 mod platform;
 mod preload;
+mod prepare;
 mod scale;
 mod state;
+mod subtitles;
 mod ui;
 
 use crossfade::Crossfade;
@@ -424,6 +426,10 @@ struct App {
     photos: Option<PhotoFolder>,
     live: Option<LivePreview>,
     stream: Option<StreamInput>,
+    subtitles: subtitles::Subtitles,
+    prepare_target: Option<prepare::Target>,
+    prepare_job: Option<prepare::Job>,
+    prepared_track: Option<(i64, i64)>,
     queue_snapshot: QueueSnapshot,
     playlist_changed: Option<Instant>,
 }
@@ -525,6 +531,9 @@ impl App {
             return;
         }
         self.media = Media::read(&self.mpv);
+        if self.media.kind == Kind::Video {
+            self.subtitles.refresh(&self.mpv);
+        }
         if let Err(error) = self.update_render_profile() {
             self.note(error);
         }
@@ -656,6 +665,87 @@ impl App {
         if self.menu == Some(Menu::Playlist) {
             self.scroll = self.media.index.unwrap_or(0).saturating_sub(3);
         }
+    }
+
+    fn start_preparation(&mut self) -> Result<(), String> {
+        if self.prepare_job.as_ref().is_some_and(|job| {
+            matches!(
+                job.status(),
+                prepare::Status::Running(..) | prepare::Status::Ready
+            )
+        }) {
+            return Ok(());
+        }
+        let target = self
+            .prepare_target
+            .clone()
+            .ok_or("Open a local video first.")?;
+        if target.cached {
+            return Ok(());
+        }
+        let duration = self.mpv.get("duration").as_f64().unwrap_or_default();
+        let was_paused = self.timing.paused;
+        self.mpv.set("pause", "yes")?;
+        match prepare::Job::start(target, duration, self.devices.preparation_device()) {
+            Ok(job) => {
+                self.prepare_job = Some(job);
+                Ok(())
+            }
+            Err(error) => {
+                if !was_paused {
+                    let _ = self.mpv.set("pause", "no");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn play_prepared(&mut self) -> Result<(), String> {
+        if self.prepared_track.is_some() {
+            return Ok(());
+        }
+        let target = self
+            .prepare_target
+            .as_ref()
+            .ok_or("Open a local video first.")?;
+        if !target.cached
+            && !self
+                .prepare_job
+                .as_ref()
+                .is_some_and(|job| matches!(job.status(), prepare::Status::Ready))
+        {
+            return Err("The prepared video isn’t ready yet.".into());
+        }
+        let original = self
+            .mpv
+            .get("current-tracks/video/id")
+            .as_i64()
+            .ok_or("No active video track.")?;
+        self.mpv.command(&[
+            "video-add",
+            &target.output.to_string_lossy(),
+            "select",
+            "Coffee · Prepared 1080p SDR",
+        ])?;
+        let prepared = self
+            .mpv
+            .get("current-tracks/video/id")
+            .as_i64()
+            .filter(|id| *id != original)
+            .ok_or("Couldn’t select the prepared video.")?;
+        self.prepared_track = Some((original, prepared));
+        self.menu = None;
+        self.mpv.set("pause", "no")
+    }
+
+    fn play_original(&mut self) -> Result<(), String> {
+        if let Some((original, prepared)) = self.prepared_track {
+            self.mpv.set("vid", &original.to_string())?;
+            self.prepared_track = None;
+            self.mpv.command(&["video-remove", &prepared.to_string()])?;
+        }
+        self.menu = None;
+        Ok(())
     }
 
     fn next(&mut self, direction: i32) {
@@ -1001,6 +1091,10 @@ impl App {
                     Picker::Subtitles => {
                         if let Err(e) = self.mpv.command(&["sub-add", &value, "select"]) {
                             self.note(e);
+                        } else if let Some(id) = self.mpv.get("current-tracks/sub/id").as_i64()
+                            && let Err(error) = self.subtitles.select(&self.mpv, id)
+                        {
+                            self.note(error);
                         }
                     }
                     Picker::SlideshowMusic => {
@@ -1040,6 +1134,11 @@ impl App {
             Action::Escape => {
                 if self.slideshow.is_some() {
                     self.stop_slideshow();
+                    return;
+                }
+                if self.menu == Some(Menu::SubtitleEncoding) {
+                    self.menu = Some(Menu::Subtitles);
+                    self.scroll = 0;
                     return;
                 }
                 if self.menu.take().is_some() {
@@ -1113,6 +1212,15 @@ impl App {
                 return;
             }
             Action::LivePhoto => self.live_photo(),
+            Action::StartPreparation => self.start_preparation(),
+            Action::CancelPreparation => {
+                if let Some(job) = &self.prepare_job {
+                    job.cancel();
+                }
+                Ok(())
+            }
+            Action::PlayPrepared => self.play_prepared(),
+            Action::PlayOriginal => self.play_original(),
             Action::PhotoZoom(zoom) => {
                 if self.zoom != zoom {
                     self.photo_drag = None;
@@ -1190,11 +1298,21 @@ impl App {
                         self.last_volume = f64::from(percent);
                     }
                 }),
-            Action::ToggleSubtitles => self.mpv.command(&["cycle", "sub-visibility"]),
+            Action::ToggleSubtitles => {
+                self.subtitles.toggle();
+                Ok(())
+            }
+            Action::SubtitleDirection(direction) => {
+                self.subtitles.set_direction(direction);
+                Ok(())
+            }
+            Action::SubtitleEncoding(encoding) => {
+                self.menu = Some(Menu::Subtitles);
+                self.scroll = 0;
+                self.subtitles.set_encoding(&self.mpv, encoding)
+            }
             Action::Audio(id) => self.mpv.set("aid", &id.to_string()),
-            Action::Subtitles(id) => self
-                .mpv
-                .set("sid", &if id == 0 { "no".into() } else { id.to_string() }),
+            Action::Subtitles(id) => self.subtitles.select(&self.mpv, id),
             Action::Speed(speed) => self.mpv.set("speed", speed),
             Action::Quality(bitrate) => {
                 self.quality = bitrate;
@@ -1451,6 +1569,12 @@ impl App {
             Event::Shutdown => return false,
             Event::Start(id) => {
                 self.active_file = Some(id);
+                self.prepare_target = None;
+                self.prepare_job = None;
+                self.prepared_track = None;
+                if self.menu == Some(Menu::Prepare) {
+                    self.menu = None;
+                }
                 self.photo_drag = None;
                 self.photo_pan = [0.0; 2];
                 if self.fade.as_ref().is_some_and(|fade| fade.target != id)
@@ -1475,6 +1599,16 @@ impl App {
                 }
                 self.pending_click = None;
                 self.refresh_media();
+                if self.media.kind == Kind::Video && self.live.is_none() {
+                    let av1 = self.mpv.get("current-tracks/video/codec").as_str() == Some("av1");
+                    self.prepare_target = library::normalize(&self.media.path).and_then(|path| {
+                        prepare::Target::local(
+                            &path,
+                            self.media.source_range.starts_with("HDR"),
+                            av1,
+                        )
+                    });
+                }
                 if self.live.is_none() {
                     self.prepare_photos();
                     if self.photos.is_none() {
@@ -1676,6 +1810,12 @@ impl App {
                         || self.hovered.elapsed() < Duration::from_secs(3)
                 };
             let controls_opacity = self.controls.update(show_controls, Instant::now());
+            let subtitle_position = ui::subtitle_position(
+                (w, h),
+                self.media.kind == Kind::Video && controls_opacity > 0,
+            );
+            let caption = self.subtitles.sync(&self.mpv, subtitle_position);
+            let prepare_status = self.prepare_job.as_ref().map(prepare::Job::status);
             let frame = ui::draw(View {
                 w,
                 h,
@@ -1692,6 +1832,14 @@ impl App {
                         .as_ref()
                         .is_some_and(|folder| folder.live_clip().is_some()),
                 live_playing: self.live.is_some(),
+                prepare: self.prepare_target.as_ref().map(|target| ui::PrepareView {
+                    cached: target.cached,
+                    playing: self.prepared_track.is_some(),
+                    status: prepare_status.as_ref(),
+                }),
+                caption: caption.as_deref(),
+                subtitle_direction: self.subtitles.direction,
+                subtitle_encoding: self.subtitles.encoding,
                 photo_zoom: self.zoom,
                 slideshow_playing: self.slideshow.is_some(),
                 slideshow_music: self.slideshow_music.as_deref(),
@@ -1898,6 +2046,10 @@ fn entry() -> Result<(), String> {
         photos: None,
         live: None,
         stream: None,
+        subtitles: subtitles::Subtitles::default(),
+        prepare_target: None,
+        prepare_job: None,
+        prepared_track: None,
         queue_snapshot: QueueSnapshot::default(),
         playlist_changed: None,
     };
