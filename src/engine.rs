@@ -499,23 +499,38 @@ impl Engine {
     }
 
     pub fn crossfade_bitmap(&self, shot: &Snapshot, pixels: &[u8], display: (i32, i32)) -> bool {
-        if pixels.len() != shot.width * shot.height * 4 {
+        self.bitmap_overlay(
+            "1",
+            (shot.width, shot.height),
+            pixels,
+            (0, 0, display.0, display.1),
+        )
+    }
+
+    pub fn bitmap_overlay(
+        &self,
+        id: &str,
+        (width, height): (usize, usize),
+        pixels: &[u8],
+        (x, y, display_w, display_h): (i32, i32, i32, i32),
+    ) -> bool {
+        if width.checked_mul(height).and_then(|n| n.checked_mul(4)) != Some(pixels.len()) {
             return false;
         }
         // overlay-add copies the buffer before the command returns.
         self.command(&[
             "overlay-add",
-            "1",
-            "0",
-            "0",
+            id,
+            &x.to_string(),
+            &y.to_string(),
             &format!("&{}", pixels.as_ptr() as usize),
             "0",
             "bgra",
-            &shot.width.to_string(),
-            &shot.height.to_string(),
-            &(shot.width * 4).to_string(),
-            &display.0.to_string(),
-            &display.1.to_string(),
+            &width.to_string(),
+            &height.to_string(),
+            &(width * 4).to_string(),
+            &display_w.to_string(),
+            &display_h.to_string(),
         ])
         .is_ok()
     }

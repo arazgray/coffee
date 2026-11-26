@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 1.2** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.2/SHA256SUMS.txt)
+**Coffee 1.3** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.3/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-media-player-1.2.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-media-player-1.2.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.2/coffee-1.2.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-media-player-1.3.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-media-player-1.3.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.3/coffee-1.3.0-windows-x86_64.zip) |
 
 ## Install
 
@@ -41,12 +41,14 @@ Coffee requires **libmpv 0.41 or newer**.
 
 To build from source, install Rust and run `cargo test --locked` and `cargo build --release --locked`. On Linux, `sh install.sh` installs the result for the current user. `coffee --smoke-test path/to/media` checks opening and decoding a file without creating a player window. `COFFEE_LIBMPV` can point to a different libmpv installation.
 
-**Smooth Playback** also needs the FFmpeg command-line program with `libx264` and `zscale` for the software path. Install `ffmpeg` from your Linux package manager, `brew install ffmpeg` on macOS, or `pacman -S mingw-w64-ucrt-x86_64-ffmpeg` in MSYS2 **UCRT64** on Windows. Set `COFFEE_FFMPEG` to use a different executable. On Linux, the subtitle font picker uses `fc-list` from the `fontconfig` package.
+**Smooth Playback** needs the FFmpeg command-line program with `libx264` and `zscale` for the software path. Seek thumbnails also use this executable. Install `ffmpeg` from your Linux package manager, `brew install ffmpeg` on macOS, or `pacman -S mingw-w64-ucrt-x86_64-ffmpeg` in MSYS2 **UCRT64** on Windows. Set `COFFEE_FFMPEG` to use a different executable. On Linux, the subtitle font picker uses `fc-list` from the `fontconfig` package.
 
 ## Playback
 
 - Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
 - **Repeat One**, just before the volume button, loops the current video or song without advancing the queue. Click it again to turn it off.
+- **Playback** contains speed, HDR, decoder, and rendering settings. The speed buttons range from **−16×** (reverse) to **+16×** (forward); **+1×** is normal speed. Reverse is available for seekable media and uses software decoding for video. It may be slower on some formats, and embedded subtitles may not show in reverse.
+- Hover over the seek bar to see the timestamp and a thumbnail. Hovering does not seek. Thumbnails use FFmpeg for local videos; if a frame cannot be decoded or the video is a stream, the timestamp still appears.
 - Open a photo to browse nearby images with **Previous** and **Next**. Photos switch without a fade or hiding the controls. Coffee preloads five photos on each side and their Live clips in the background, prioritizing the current Live clip. The RAM cache is bounded at 256 MiB (128 MiB per file); uncached files still open normally.
 - A same-named `.MOV` companion adds a **Live** badge. Click it to play the clip and automatically return to the still without adding a playlist item. Live Photo transitions blend directly into the next frame over 150 ms.
 - **Slideshow**, beside **Live** in the playback area, opens a dropdown with optional music and a **Play** button. Play enters fullscreen and crossfades to the next photo every five seconds, looping through the folder. Move the mouse to reveal the hidden controls, or press **Esc** to stop the slideshow and its music.
@@ -111,7 +113,7 @@ Many of the same audio codecs also play as tracks inside video containers, inclu
 
 ## HDR and hardware decoding
 
-Coffee uses libmpv's `gpu-next` renderer. On Wayland it tries Vulkan first, keeping video on the native renderer and the controls in an SDR overlay. **HDR** contains **Off (SDR only)**, **Automatic**, **Prefer native HDR**, **Video decoder**, and **Rendering quality**.
+Coffee uses libmpv's `gpu-next` renderer. On Wayland it tries Vulkan first, keeping video on the native renderer and the controls in an SDR overlay. **Playback** contains **Off (SDR only)**, **Automatic HDR**, **Prefer native HDR**, **Video decoder**, and **Rendering quality**.
 
 **Video info** shows the actual decoder, display target, and dropped frames. Choosing a GPU cannot accelerate a codec that it does not support. The default rendering mode switches to lighter scaling and static tone mapping for 4K at 50 fps or above. HDR presentation still depends on the GPU, driver, and display.
 

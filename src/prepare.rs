@@ -353,9 +353,9 @@ impl Drop for Job {
 
 const MAX_SIZE: &str =
     "w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2";
-const HDR_CONVERT: &str = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable,zscale=t=bt709:m=bt709:r=limited";
+pub const HDR_CONVERT: &str = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable,zscale=t=bt709:m=bt709:r=limited";
 
-fn ffmpeg() -> Command {
+pub fn ffmpeg() -> Command {
     let program = env::var_os("COFFEE_FFMPEG").map(PathBuf::from);
     #[cfg(target_os = "windows")]
     let program = program.or_else(|| {

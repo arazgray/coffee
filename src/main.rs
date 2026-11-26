@@ -12,6 +12,7 @@ mod platform;
 mod preload;
 mod prepare;
 mod scale;
+mod seek_preview;
 mod state;
 mod subtitles;
 mod ui;
@@ -160,6 +161,8 @@ struct Timings {
     buffered: f64,
     volume: f64,
     speed: f64,
+    reverse: bool,
+    seekable: bool,
     dimensions: (i32, i32),
     pan_bounds: PanBounds,
     mouse: Option<(i32, i32)>,
@@ -196,6 +199,8 @@ impl Timings {
                 .unwrap_or_default(),
             volume: mpv.get("volume").as_f64().unwrap_or(100.0),
             speed: mpv.get("speed").as_f64().unwrap_or(1.0),
+            reverse: mpv.get("play-direction").as_str() == Some("backward"),
+            seekable: mpv.get("seekable").as_bool() == Some(true),
             dimensions: size,
             pan_bounds: PanBounds::from_margins(
                 size,
@@ -436,6 +441,8 @@ struct App {
     prepare_job: Option<prepare::Job>,
     prepared_track: Option<(i64, i64)>,
     playback_health: prepare::PlaybackHealth,
+    reverse_hwdec: Option<String>,
+    seek_preview: seek_preview::Preview,
     queue_snapshot: QueueSnapshot,
     playlist_changed: Option<Instant>,
 }
@@ -734,6 +741,8 @@ impl App {
         }
         if self.timing.paused
             || self.timing.buffering
+            || self.timing.reverse
+            || (self.timing.speed - 1.0).abs() > 0.01
             || self.timing.position < 0.25
             || self.timing.duration - self.timing.position < 0.5
         {
@@ -761,6 +770,66 @@ impl App {
             // Reveal the offer even when playback controls were hidden.
             self.hovered = now;
         }
+    }
+
+    fn set_playback_speed(&mut self, speed: f64) -> Result<(), String> {
+        if !matches!(self.media.kind, Kind::Video | Kind::Music) || self.live.is_some() {
+            return Ok(());
+        }
+        let reverse = speed < 0.0;
+        if reverse && !self.timing.seekable {
+            return Err("Reverse playback needs a seekable file.".into());
+        }
+        self.playback_health.interrupt();
+        if reverse && !self.timing.reverse && self.media.kind == Kind::Video {
+            // mpv has to retain whole decoded GOPs in reverse. Keeping those
+            // frames in hardware surfaces can exhaust the GPU decoder pool.
+            let old = match self.mpv.get("hwdec") {
+                serde_json::Value::String(mode) => mode,
+                serde_json::Value::Array(modes) if modes.is_empty() => "no".into(),
+                serde_json::Value::Array(modes) => modes
+                    .iter()
+                    .filter_map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                _ => "auto-safe".into(),
+            };
+            self.mpv.set("file-local-options/hwdec", "no")?;
+            self.reverse_hwdec = Some(old);
+        }
+        if reverse != self.timing.reverse {
+            self.mpv.set(
+                "file-local-options/play-direction",
+                if reverse { "backward" } else { "forward" },
+            )?;
+        }
+        if !reverse && let Some(old) = &self.reverse_hwdec {
+            self.mpv.set("file-local-options/hwdec", old)?;
+            self.reverse_hwdec = None;
+        }
+        self.mpv
+            .set("file-local-options/speed", &speed.abs().to_string())?;
+        if reverse
+            && !self.timing.reverse
+            && self.timing.position <= 0.1
+            && self.timing.duration > 0.25
+        {
+            self.mpv.command(&[
+                "seek",
+                &(self.timing.duration - 0.1).to_string(),
+                "absolute+exact",
+            ])?;
+        }
+        Ok(())
+    }
+
+    fn preview_original(&mut self) {
+        let source = (self.media.kind == Kind::Video && self.live.is_none())
+            .then(|| library::normalize(&self.media.path).map(PathBuf::from))
+            .flatten()
+            .filter(|path| path.is_absolute() && path.is_file())
+            .map(|path| (path, self.media.source_range.starts_with("HDR")));
+        self.seek_preview.source(&self.mpv, source);
     }
 
     fn start_preparation(&mut self) -> Result<(), String> {
@@ -833,6 +902,8 @@ impl App {
             .filter(|id| *id != original)
             .ok_or("Couldn’t select the prepared video.")?;
         self.prepared_track = Some((original, prepared));
+        self.seek_preview
+            .source(&self.mpv, Some((target.output.clone(), false)));
         self.menu = None;
         self.mpv.set("pause", "no")
     }
@@ -842,6 +913,7 @@ impl App {
             self.mpv.set("vid", &original.to_string())?;
             self.prepared_track = None;
             self.mpv.command(&["video-remove", &prepared.to_string()])?;
+            self.preview_original();
         }
         self.menu = None;
         Ok(())
@@ -1241,6 +1313,11 @@ impl App {
                     self.scroll = 0;
                     return;
                 }
+                if matches!(self.menu, Some(Menu::Decoder | Menu::Rendering)) {
+                    self.menu = Some(Menu::Playback);
+                    self.scroll = 0;
+                    return;
+                }
                 if self.menu.take().is_some() {
                     return;
                 }
@@ -1355,8 +1432,15 @@ impl App {
                     return;
                 }
                 self.playback_health.interrupt();
-                self.mpv
-                    .command(&["seek", &seconds.to_string(), "relative"])
+                self.mpv.command(&[
+                    "seek",
+                    &seconds.to_string(),
+                    if self.timing.reverse {
+                        "relative+exact"
+                    } else {
+                        "relative"
+                    },
+                ])
             }
             Action::Seek(part) => {
                 self.playback_health.interrupt();
@@ -1430,7 +1514,7 @@ impl App {
             }
             Action::Audio(id) => self.mpv.set("aid", &id.to_string()),
             Action::Subtitles(id) => self.subtitles.select(&self.mpv, id),
-            Action::Speed(speed) => self.mpv.set("speed", speed),
+            Action::Speed(speed) => self.set_playback_speed(speed),
             Action::Quality(bitrate) => {
                 self.quality = bitrate;
                 self.mpv.set("hls-bitrate", bitrate).and_then(|_| {
@@ -1445,6 +1529,10 @@ impl App {
                 self.hdr = mode;
             }),
             Action::Decode(choice) => {
+                if self.timing.reverse {
+                    self.note("Switch to forward playback to change the video decoder.");
+                    return;
+                }
                 if self.decoder == choice && env::var_os("KAHVE_HWDEC").is_none() {
                     return;
                 }
@@ -1686,6 +1774,8 @@ impl App {
             Event::Shutdown => return false,
             Event::Start(id) => {
                 self.active_file = Some(id);
+                self.reverse_hwdec = None;
+                self.seek_preview.source(&self.mpv, None);
                 self.prepare_target = None;
                 self.playback_health = prepare::PlaybackHealth::default();
                 self.prepare_job = None;
@@ -1717,6 +1807,7 @@ impl App {
                 }
                 self.pending_click = None;
                 self.refresh_media();
+                self.preview_original();
                 if self.media.kind == Kind::Video && self.live.is_none() {
                     let av1 = self.mpv.get("current-tracks/video/codec").as_str() == Some("av1");
                     self.prepare_target = library::normalize(&self.media.path).and_then(|path| {
@@ -1942,6 +2033,29 @@ impl App {
             );
             let caption = self.subtitles.sync(&self.mpv, subtitle_position);
             let prepare_status = self.prepare_job.as_ref().map(prepare::Job::status);
+            let hover = (show_controls
+                && controls_opacity > 0
+                && self.menu.is_none()
+                && self.stream.is_none()
+                && self.media.kind == Kind::Video
+                && self.timing.seekable
+                && self.timing.duration > 0.0)
+                .then(|| {
+                    self.timing
+                        .mouse
+                        .and_then(|mouse| ui::seek_hover((w, h), mouse))
+                })
+                .flatten();
+            let request = hover
+                .filter(|_| !matches!(prepare_status, Some(prepare::Status::Running(..))))
+                .map(|hover| {
+                    (
+                        (hover.fraction * self.timing.duration)
+                            .min((self.timing.duration - 0.1).max(0.0)),
+                        hover.image_bounds,
+                    )
+                });
+            let has_image = self.seek_preview.update(&self.mpv, request, now);
             let frame = ui::draw(View {
                 w,
                 h,
@@ -1958,6 +2072,11 @@ impl App {
                         .as_ref()
                         .is_some_and(|folder| folder.live_clip().is_some()),
                 live_playing: self.live.is_some(),
+                timeline: hover.map(|hover| ui::TimelineView {
+                    hover,
+                    seconds: hover.fraction * self.timing.duration,
+                    has_image,
+                }),
                 prepare: self
                     .prepare_target
                     .as_ref()
@@ -2017,7 +2136,12 @@ impl App {
                 decoder: self.decoder,
                 render_mode: self.render_mode,
                 fast_render: self.fast_render,
-                speed: self.timing.speed,
+                speed: if self.timing.reverse {
+                    -self.timing.speed
+                } else {
+                    self.timing.speed
+                },
+                seekable: self.timing.seekable,
                 quality: self.quality,
                 toast: if self.toast.1.elapsed() < Duration::from_secs(4) {
                     &self.toast.0
@@ -2201,6 +2325,8 @@ fn entry() -> Result<(), String> {
         prepare_job: None,
         prepared_track: None,
         playback_health: prepare::PlaybackHealth::default(),
+        reverse_hwdec: None,
+        seek_preview: seek_preview::Preview::default(),
         queue_snapshot: QueueSnapshot::default(),
         playlist_changed: None,
     };

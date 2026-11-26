@@ -30,10 +30,9 @@ pub enum Menu {
     Subtitles,
     SubtitleEncoding,
     SubtitleFont,
-    Settings,
+    Playback,
     Decoder,
     Rendering,
-    Hdr,
     Info,
     About,
     Shortcuts,
@@ -84,7 +83,7 @@ pub enum Action {
     SubtitleDirection(Direction),
     SubtitleEncoding(Encoding),
     SubtitleFont(Option<usize>),
-    Speed(&'static str),
+    Speed(f64),
     Quality(&'static str),
     Hdr(Hdr),
     Decode(DecodeChoice),
@@ -133,6 +132,15 @@ impl Layout {
             x as f64 * self.logical.0 as f64 / self.physical.0 as f64,
             y as f64 * self.logical.1 as f64 / self.physical.1 as f64,
         )
+    }
+    fn physical_rect(&self, r: Rect) -> (i32, i32, i32, i32) {
+        let x = |x: i32| {
+            (f64::from(x) * f64::from(self.physical.0) / f64::from(self.logical.0)).round() as i32
+        };
+        let y = |y: i32| {
+            (f64::from(y) * f64::from(self.physical.1) / f64::from(self.logical.1)).round() as i32
+        };
+        (x(r.x), y(r.y), x(r.x + r.w) - x(r.x), y(r.y + r.h) - y(r.y))
     }
     fn pixel_aligned_icon(&self, (x, y): (i32, i32), size: i32) -> ((f64, f64), (f64, f64)) {
         let physical_size = f64::from(pixels(size));
@@ -422,6 +430,21 @@ impl PrepareView<'_> {
 }
 
 #[derive(Clone, Copy)]
+pub struct SeekHover {
+    pub fraction: f64,
+    box_rect: Rect,
+    image: Rect,
+    pub image_bounds: (i32, i32, i32, i32),
+}
+
+#[derive(Clone, Copy)]
+pub struct TimelineView {
+    pub hover: SeekHover,
+    pub seconds: f64,
+    pub has_image: bool,
+}
+
+#[derive(Clone, Copy)]
 pub struct View<'a> {
     pub w: i32,
     pub h: i32,
@@ -431,6 +454,7 @@ pub struct View<'a> {
     pub live_available: bool,
     pub live_playing: bool,
     pub prepare: Option<PrepareView<'a>>,
+    pub timeline: Option<TimelineView>,
     pub caption: Option<&'a str>,
     pub caption_style: CaptionStyle,
     pub subtitle_direction: Option<Direction>,
@@ -465,6 +489,7 @@ pub struct View<'a> {
     pub render_mode: RenderMode,
     pub fast_render: bool,
     pub speed: f64,
+    pub seekable: bool,
     pub quality: &'a str,
     pub toast: &'a str,
 }
@@ -481,6 +506,71 @@ fn bottom_height(view: View<'_>) -> i32 {
 
 fn video_bar_height(w: i32) -> i32 {
     if w < 670 { 91 } else { 62 }
+}
+
+fn seek_track(w: i32, bar_y: i32) -> Rect {
+    Rect::new(13, bar_y + 2, w - 26, 17)
+}
+
+pub fn seek_hover(dimensions: (i32, i32), point: (i32, i32)) -> Option<SeekHover> {
+    let layout = Layout::new(dimensions.0, dimensions.1);
+    let (w, h) = layout.logical;
+    if w < 120 || h < 120 {
+        return None;
+    }
+    let bar_y = h - video_bar_height(w);
+    let track = seek_track(w, bar_y);
+    let logical = layout.logical_point(point);
+    if !track.contains(floor(logical)) || bar_y < 62 {
+        return None;
+    }
+    let label_y = bar_y - 30;
+    let width = (w - 16).min(200).min(((label_y - 8) * 16 / 9) + 8);
+    let left = (logical.0.round() as i32 - width / 2).clamp(8, w - width - 8);
+    let image_height = (width - 8) * 9 / 16;
+    let image = Rect::new(left + 4, label_y - image_height, width - 8, image_height);
+    Some(SeekHover {
+        fraction: ((logical.0 - f64::from(track.x)) / f64::from(track.w)).clamp(0.0, 1.0),
+        box_rect: Rect::new(left, image.y - 4, width, image_height + 26),
+        image,
+        image_bounds: layout.physical_rect(image),
+    })
+}
+
+fn timeline_preview(f: &mut Frame, t: TimelineView) {
+    let outer = t.hover.box_rect;
+    let rect = if t.has_image {
+        outer
+    } else {
+        let wide = outer.w.min(74);
+        Rect::new(
+            outer.x + (outer.w - wide) / 2,
+            outer.y + outer.h - 24,
+            wide,
+            24,
+        )
+    };
+    f.rect(rect, 6, LINE, 0);
+    f.rect(
+        Rect::new(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2),
+        5,
+        PANEL,
+        0,
+    );
+    let label_y = if t.has_image {
+        t.hover.image.y + t.hover.image.h + 11
+    } else {
+        rect.y + 12
+    };
+    f.text(
+        rect.x + rect.w / 2,
+        label_y,
+        12,
+        5,
+        TEXT,
+        true,
+        &time(t.seconds),
+    );
 }
 
 fn subtitle_lift(w: i32, controls: bool) -> i32 {
@@ -633,6 +723,9 @@ pub fn draw(mut v: View<'_>) -> Frame {
         f.interactive = v.controls_interactive;
         top(&mut f, v);
         bottom(&mut f, v);
+        if let Some(timeline) = v.timeline {
+            timeline_preview(&mut f, timeline);
+        }
         if v.resize_grips {
             resize_grips(&mut f, w, h);
         }
@@ -1143,7 +1236,7 @@ fn bottom(f: &mut Frame, v: View<'_>) {
     let row = y + if image { 4 } else { 20 };
     let right_row = if v.w < 670 && !image { row + 32 } else { row };
     if !image {
-        let slider = Rect::new(13, y + 2, v.w - 26, 17);
+        let slider = seek_track(v.w, y);
         let bar_w = slider.w;
         f.rect(Rect::new(13, y + 9, bar_w, 4), 2, "514944", 0);
         if v.duration > 0.0 {
@@ -1292,11 +1385,10 @@ fn bottom(f: &mut Frame, v: View<'_>) {
             Some(Menu::Playlist),
             Action::Menu(Menu::Playlist),
         ),
-        ("HDR", Some(Menu::Hdr), Action::Menu(Menu::Hdr)),
         (
-            "Settings2",
-            Some(Menu::Settings),
-            Action::Menu(Menu::Settings),
+            "Playback",
+            Some(Menu::Playback),
+            Action::Menu(Menu::Playback),
         ),
         (
             "Captions",
@@ -1305,20 +1397,18 @@ fn bottom(f: &mut Frame, v: View<'_>) {
         ),
         ("Headphones", Some(Menu::Audio), Action::Menu(Menu::Audio)),
     ] {
-        if (image && !matches!(icon, "Expand" | "Minimize" | "SquarePlay" | "ListVideo"))
-            || (v.media.kind == Kind::Music && icon == "HDR")
-        {
+        if image && !matches!(icon, "Expand" | "Minimize" | "SquarePlay" | "ListVideo") {
             continue;
         }
-        let wide = if icon == "HDR" { 44 } else { 34 };
+        let wide = if icon == "Playback" { 82 } else { 34 };
         right -= wide;
         let r = Rect::new(right, right_row, wide - 2, 32);
-        if icon == "HDR" {
+        if icon == "Playback" {
             f.button(
                 r,
-                if v.hdr == Hdr::Off { "SDR" } else { "HDR" },
+                "Playback",
                 v,
-                (v.hdr == Hdr::Prefer, true),
+                (v.menu == Some(Menu::Playback), true),
                 action,
             );
         } else {
@@ -1371,6 +1461,7 @@ struct Row {
     action: Option<Action>,
     active: bool,
     remove: Option<usize>,
+    speeds: Option<&'static [(f64, &'static str)]>,
 }
 fn row(label: impl Into<String>, action: Action) -> Row {
     Row {
@@ -1378,6 +1469,7 @@ fn row(label: impl Into<String>, action: Action) -> Row {
         action: Some(action),
         active: false,
         remove: None,
+        speeds: None,
     }
 }
 fn note(label: impl Into<String>) -> Row {
@@ -1386,6 +1478,7 @@ fn note(label: impl Into<String>) -> Row {
         action: None,
         active: false,
         remove: None,
+        speeds: None,
     }
 }
 fn selected(label: impl Into<String>, action: Action, active: bool) -> Row {
@@ -1394,10 +1487,83 @@ fn selected(label: impl Into<String>, action: Action, active: bool) -> Row {
         action: Some(action),
         active,
         remove: None,
+        speeds: None,
+    }
+}
+
+const REVERSE_SPEEDS: &[(f64, &str)] = &[
+    (-16.0, "−16×"),
+    (-8.0, "−8×"),
+    (-4.0, "−4×"),
+    (-2.0, "−2×"),
+    (-1.0, "−1×"),
+    (-0.5, "−0.5×"),
+    (-0.25, "−0.25×"),
+];
+const FORWARD_SPEEDS: &[(f64, &str)] = &[
+    (0.25, "+0.25×"),
+    (0.5, "+0.5×"),
+    (0.75, "+0.75×"),
+    (1.0, "+1×"),
+    (1.25, "+1.25×"),
+    (1.5, "+1.5×"),
+    (2.0, "+2×"),
+    (4.0, "+4×"),
+    (8.0, "+8×"),
+    (16.0, "+16×"),
+];
+
+fn speed_buttons(f: &mut Frame, v: View<'_>, r: Rect, choices: &[(f64, &str)]) {
+    f.rect(r, 6, LINE, 0);
+    f.rect(
+        Rect::new(r.x + 1, r.y + 1, r.w - 2, r.h - 2),
+        5,
+        "211A16",
+        0,
+    );
+    let count = choices.len() as i32;
+    for (i, &(speed, label)) in choices.iter().enumerate() {
+        let start = (r.w - 2) * i as i32 / count;
+        let end = (r.w - 2) * (i as i32 + 1) / count;
+        let part = Rect::new(r.x + 1 + start, r.y + 1, end - start, r.h - 2);
+        let enabled = v.seekable || speed > 0.0;
+        let active = (speed - v.speed).abs() < 0.001;
+        if active || (enabled && part.contains(v.mouse)) {
+            f.rect(part, 4, if active { "3D2A1E" } else { "31251D" }, 0);
+        }
+        if i > 0 {
+            f.rect(Rect::new(part.x, r.y + 5, 1, r.h - 10), 0, LINE, 0);
+        }
+        let color = if active {
+            ACCENT
+        } else if enabled {
+            TEXT
+        } else {
+            MUTED
+        };
+        f.text(
+            part.x + part.w / 2,
+            r.y + r.h / 2,
+            pixels(11),
+            5,
+            color,
+            active,
+            label,
+        );
+        if enabled {
+            f.hit(part, Action::Speed(speed));
+        }
     }
 }
 
 fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
+    let width = match menu {
+        Menu::Open => (v.w - OPEN_LEFT - 10).min(pixels(212)),
+        Menu::Slideshow => (v.w - 20).min(pixels(247)),
+        Menu::Context => (v.w - 16).min(pixels(200)),
+        Menu::Playback => (v.w - pixels(20)).min(pixels(472)),
+        _ => (v.w - pixels(20)).min(pixels(390)),
+    };
     let mut rows = Vec::new();
     let title = match menu {
         Menu::Prepare => return,
@@ -1534,20 +1700,37 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             }
             "SUBTITLE FONT"
         }
-        Menu::Settings => {
-            for (text, speed) in [
-                ("0.5×", "0.5"),
-                ("0.75×", "0.75"),
-                ("Normal", "1"),
-                ("1.25×", "1.25"),
-                ("1.5×", "1.5"),
-                ("2×", "2"),
-            ] {
-                rows.push(selected(
-                    text,
-                    Action::Speed(speed),
-                    speed.parse::<f64>().ok() == Some(v.speed),
-                ));
+        Menu::Playback => {
+            if matches!(v.media.kind, Kind::Video | Kind::Music) {
+                rows.push(note(if v.seekable {
+                    "Speed · − reverse / + forward"
+                } else {
+                    "Speed · reverse needs a seekable file"
+                }));
+                let columns = ((width - pixels(14)) / pixels(44)).clamp(2, 10) as usize;
+                for speeds in [REVERSE_SPEEDS, FORWARD_SPEEDS] {
+                    rows.extend(speeds.chunks(columns).map(|group| Row {
+                        speeds: Some(group),
+                        ..note("")
+                    }));
+                }
+            }
+            if v.media.kind != Kind::Music {
+                rows.extend([
+                    note(format!(
+                        "HDR · {} → {}",
+                        v.media.source_range, v.media.output_range
+                    )),
+                    selected("Off (SDR only)", Action::Hdr(Hdr::Off), v.hdr == Hdr::Off),
+                    selected("Automatic HDR", Action::Hdr(Hdr::Auto), v.hdr == Hdr::Auto),
+                    selected(
+                        "Prefer native HDR",
+                        Action::Hdr(Hdr::Prefer),
+                        v.hdr == Hdr::Prefer,
+                    ),
+                    row("Video decoder", Action::Menu(Menu::Decoder)),
+                    row("Rendering quality", Action::Menu(Menu::Rendering)),
+                ]);
             }
             if is_stream(&v.media.path) {
                 rows.push(note("HLS bitrate cap · reloads the stream"));
@@ -1560,7 +1743,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
                     rows.push(selected(label, Action::Quality(value), v.quality == value));
                 }
             }
-            "PLAYBACK SETTINGS"
+            "PLAYBACK"
         }
         Menu::Decoder => {
             rows.push(selected(
@@ -1590,7 +1773,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             } else {
                 rows.push(note("Unsupported formats fall back to the CPU."));
             }
-            rows.push(row("Back to HDR", Action::Menu(Menu::Hdr)));
+            rows.push(row("Back to Playback", Action::Menu(Menu::Playback)));
             "VIDEO DECODER"
         }
         Menu::Rendering => {
@@ -1607,27 +1790,8 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
                 "Active: Quality · higher-quality scaling"
             }));
             rows.push(note("Fast uses static HDR tone mapping when needed."));
-            rows.push(row("Back to HDR", Action::Menu(Menu::Hdr)));
+            rows.push(row("Back to Playback", Action::Menu(Menu::Playback)));
             "RENDERING QUALITY"
-        }
-        Menu::Hdr => {
-            rows.extend([
-                selected("Off (SDR only)", Action::Hdr(Hdr::Off), v.hdr == Hdr::Off),
-                selected("Automatic", Action::Hdr(Hdr::Auto), v.hdr == Hdr::Auto),
-                selected(
-                    "Prefer native HDR",
-                    Action::Hdr(Hdr::Prefer),
-                    v.hdr == Hdr::Prefer,
-                ),
-                row("Video decoder", Action::Menu(Menu::Decoder)),
-                row("Rendering quality", Action::Menu(Menu::Rendering)),
-                note(format!(
-                    "Source: {} · output: {}",
-                    v.media.source_range, v.media.output_range
-                )),
-                note("Enable HDR in KDE on a compatible display."),
-            ]);
-            "DYNAMIC RANGE"
         }
         Menu::Info => {
             if v.media.kind == Kind::Empty {
@@ -1673,12 +1837,6 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             }
             "KEYBOARD SHORTCUTS"
         }
-    };
-    let width = match menu {
-        Menu::Open => (v.w - OPEN_LEFT - 10).min(pixels(212)),
-        Menu::Slideshow => (v.w - 20).min(pixels(247)),
-        Menu::Context => (v.w - 16).min(pixels(200)),
-        _ => (v.w - pixels(20)).min(pixels(390)),
     };
     let row_height = pixels(28);
     let header = pixels(if menu == Menu::SubtitleFont { 70 } else { 34 });
@@ -1811,6 +1969,10 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
     for (i, item) in rows.into_iter().skip(scroll).take(end - scroll).enumerate() {
         let row_y = y + header - pixels(4) + i as i32 * row_height;
         let r = Rect::new(x + pixels(5), row_y, width - pixels(10), pixels(26));
+        if let Some(speeds) = item.speeds {
+            speed_buttons(f, v, Rect::new(r.x + 3, r.y, r.w - 6, r.h), speeds);
+            continue;
+        }
         if item.active || (r.contains(v.mouse) && item.action.is_some()) {
             f.rect(
                 r,
@@ -2061,6 +2223,7 @@ mod tests {
             live_available: false,
             live_playing: false,
             prepare: None,
+            timeline: None,
             caption: None,
             caption_style: CaptionStyle::default(),
             subtitle_direction: None,
@@ -2095,6 +2258,7 @@ mod tests {
             render_mode: RenderMode::Auto,
             fast_render: false,
             speed: 1.0,
+            seekable: true,
             quality: "max",
             toast: "",
         }
@@ -2267,23 +2431,23 @@ mod tests {
     }
 
     #[test]
-    fn decoder_and_rendering_are_in_hdr_with_aligned_hit_targets() {
+    fn playback_menu_combines_speed_hdr_decoder_and_rendering() {
         let media = Media {
             kind: Kind::Video,
             ..Media::default()
         };
         let mut view = video(&media);
-        view.menu = Some(Menu::Hdr);
+        view.menu = Some(Menu::Playback);
         let frame = draw(view);
         let (bounds, _) = frame
             .hits
             .iter()
             .find(|(_, action)| *action == Action::Scroll(0))
             .unwrap();
-        assert_eq!(bounds.w, pixels(390));
-        for (index, label, menu) in [
-            (3, "Video decoder", Menu::Decoder),
-            (4, "Rendering quality", Menu::Rendering),
+        assert_eq!(bounds.w, pixels(472));
+        for (label, menu) in [
+            ("Video decoder", Menu::Decoder),
+            ("Rendering quality", Menu::Rendering),
         ] {
             assert!(
                 frame
@@ -2291,9 +2455,12 @@ mod tests {
                     .lines()
                     .any(|line| line.contains(r"\fs13") && line.ends_with(label))
             );
-            let point = frame
-                .layout
-                .physical_point((bounds.x + 25, bounds.y + pixels(43) + index * pixels(28)));
+            let (r, _) = frame
+                .hits
+                .iter()
+                .find(|(_, a)| *a == Action::Menu(menu))
+                .unwrap();
+            let point = frame.layout.physical_point((r.x + 25, r.y + 10));
             assert_eq!(frame.at(point), Action::Menu(menu));
 
             view.menu = Some(menu);
@@ -2302,22 +2469,55 @@ mod tests {
                 submenu
                     .osd()
                     .lines()
-                    .any(|line| line.ends_with("Back to HDR"))
+                    .any(|line| line.ends_with("Back to Playback"))
             );
             assert!(
                 submenu
                     .hits
                     .iter()
-                    .any(|(_, action)| *action == Action::Menu(Menu::Hdr))
+                    .any(|(_, action)| *action == Action::Menu(Menu::Playback))
             );
         }
-        view.menu = Some(Menu::Settings);
+        for action in [
+            Action::Speed(-16.0),
+            Action::Speed(16.0),
+            Action::Hdr(Hdr::Prefer),
+        ] {
+            assert!(frame.hits.iter().any(|(_, a)| *a == action));
+        }
+        view.menu = Some(Menu::Playback);
+        view.seekable = false;
         assert!(
             !draw(view)
                 .hits
                 .iter()
-                .any(|(_, action)| matches!(action, Action::Menu(Menu::Decoder | Menu::Rendering)))
+                .any(|(_, a)| matches!(a, Action::Speed(speed) if *speed < 0.0))
         );
+    }
+
+    #[test]
+    fn timeline_preview_uses_the_same_track_as_seek_and_stays_inside_window() {
+        let media = Media {
+            kind: Kind::Video,
+            ..Default::default()
+        };
+        for width in [1100, 420] {
+            let mut v = video(&media);
+            v.w = width;
+            let frame = draw(v);
+            let (w, h) = frame.resolution();
+            let bar = h - video_bar_height(w);
+            for x in [14, w / 2, w - 14] {
+                let point = frame.layout.physical_point((x, bar + 9));
+                let hover = seek_hover((width, v.h), point).unwrap();
+                assert_eq!(frame.at(point), Action::Seek(hover.fraction));
+                let (x, y, image_w, image_h) = hover.image_bounds;
+                assert!(x >= 0 && x + image_w <= width && y >= 0 && y + image_h < v.h);
+            }
+            assert!(
+                seek_hover((width, v.h), frame.layout.physical_point((w / 2, bar + 33))).is_none()
+            );
+        }
     }
 
     #[test]
