@@ -2,6 +2,8 @@
 
 mod engine;
 mod gpu;
+mod heif_source;
+mod image_source;
 mod library;
 mod photos;
 mod platform;
@@ -497,6 +499,11 @@ impl App {
     fn queue(&mut self, paths: &[String], append: bool, current: usize) {
         let mut valid = paths.iter().filter_map(|p| library::normalize(p));
         if let Some(first) = valid.next() {
+            if !append {
+                self.photos = None;
+                self.fade = None;
+                self.finish_live(false);
+            }
             let _ = self.mpv.command(&[
                 "loadfile",
                 &first,
@@ -515,6 +522,42 @@ impl App {
             }
             // In-app opens, queue loads and Add files aren't native drops.
             self.queue_snapshot = QueueSnapshot::read(&self.mpv);
+        }
+    }
+
+    fn prepare_photos(&mut self) {
+        if self.media.kind != Kind::Image {
+            self.photos = None;
+            return;
+        }
+        if self
+            .photos
+            .as_mut()
+            .is_some_and(|folder| folder.select(Path::new(&self.media.path)))
+        {
+            return;
+        }
+        self.photos = PhotoFolder::scan(&self.media.path);
+        if let Some(folder) = &self.photos
+            && self.media.playlist.len() == 1
+            && folder.files().len() > 1
+        {
+            // Eagerly queue the siblings, not their pixels. Keep the
+            // currently decoded still and don't touch an explicit playlist.
+            for (index, path) in folder.files().iter().enumerate() {
+                if index != folder.index {
+                    let _ = self
+                        .mpv
+                        .command(&["loadfile", &path.to_string_lossy(), "append"]);
+                }
+            }
+            if folder.index != 0 {
+                let _ = self
+                    .mpv
+                    .command(&["playlist-move", "0", &(folder.index + 1).to_string()]);
+            }
+            self.queue_snapshot = QueueSnapshot::read(&self.mpv);
+            self.refresh_media();
         }
     }
 
@@ -557,8 +600,16 @@ impl App {
     }
 
     fn next(&mut self, direction: i32) {
+        // mpv sets the playlist position before it emits FILE_LOADED. Use
+        // the selected entry so fast key presses don't skip folder items.
+        self.refresh_media();
         if self.media.kind == Kind::Image
-            && let Some(folder) = &self.photos
+            && let Some(folder) = &mut self.photos
+            && let Some(path) = self
+                .media
+                .index
+                .and_then(|index| self.media.playlist.get(index))
+            && folder.select(Path::new(path))
         {
             let Some(path) = folder
                 .adjacent(direction)
@@ -613,7 +664,7 @@ impl App {
         let clip = self
             .photos
             .as_ref()
-            .and_then(|folder| folder.live_clip.as_ref())
+            .and_then(PhotoFolder::live_clip)
             .filter(|_| self.media.kind == Kind::Image)
             .ok_or("No Live Photo clip")?;
         let queue = QueueSnapshot::read(&self.mpv);
@@ -1135,9 +1186,7 @@ impl App {
                 self.pending_click = None;
                 self.refresh_media();
                 if self.live.is_none() {
-                    self.photos = (self.media.kind == Kind::Image)
-                        .then(|| PhotoFolder::scan(&self.media.path))
-                        .flatten();
+                    self.prepare_photos();
                 }
                 *metadata = Instant::now();
                 self.hovered = Instant::now();
@@ -1240,7 +1289,15 @@ impl App {
                 last_metadata = Instant::now();
             }
             let timing = Timings::read(&self.mpv);
-            if self.live.is_some() && self.mpv.get("eof-reached").as_bool() == Some(true) {
+            if self.live.as_ref().is_some_and(|preview| {
+                self.mpv.get("eof-reached").as_bool() == Some(true)
+                    && self
+                        .mpv
+                        .get("playlist-current-pos")
+                        .as_u64()
+                        .and_then(|index| self.mpv.get(&format!("playlist/{index}/id")).as_i64())
+                        == Some(preview.clip_id)
+            }) {
                 self.finish_live(true);
             }
             if timing.volume > 0.0 {
@@ -1281,12 +1338,12 @@ impl App {
                     .photos
                     .as_ref()
                     .filter(|_| self.media.kind == Kind::Image)
-                    .map(|folder| (folder.index, folder.len())),
+                    .map(|folder| (folder.index, folder.files().len())),
                 live_available: self.media.kind == Kind::Image
                     && self
                         .photos
                         .as_ref()
-                        .is_some_and(|folder| folder.live_clip.is_some()),
+                        .is_some_and(|folder| folder.live_clip().is_some()),
                 live_playing: self.live.is_some(),
                 stream: self.stream.as_ref().map(|input| ui::StreamView {
                     before: &input.text[..input.cursor],
@@ -1297,7 +1354,8 @@ impl App {
                 paused: self.timing.paused,
                 muted: self.timing.muted,
                 fullscreen: self.timing.fullscreen,
-                native_titlebar: (wayland || cfg!(target_os = "macos")) && self.timing.border,
+                native_titlebar: (wayland || cfg!(any(windows, target_os = "macos")))
+                    && self.timing.border,
                 resize_grips: wayland
                     && !self.timing.border
                     && !self.timing.fullscreen
@@ -1361,14 +1419,8 @@ fn smoke(path: &str) -> Result<(), String> {
             }) => return Err(error),
             _ => {}
         }
-        if loaded {
+        if loaded && (mpv.get("video-params").is_object() || mpv.get("audio-params").is_object()) {
             let media = Media::read(&mpv);
-            if media.kind == Kind::Video
-                && media.source_range == "Not reported"
-                && start.elapsed() < Duration::from_millis(1200)
-            {
-                continue;
-            }
             println!(
                 "Loaded: {}\nlibmpv: {}",
                 media.title,
@@ -1386,7 +1438,7 @@ fn smoke(path: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    Err("Timed out opening the test media".into())
+    Err("Timed out waiting for a decoded video frame or audio output".into())
 }
 
 fn entry() -> Result<(), String> {

@@ -84,6 +84,7 @@ pub fn image_path(path: &str) -> bool {
                     | "jpg"
                     | "jpeg"
                     | "jfif"
+                    | "jpe"
                     | "bmp"
                     | "webp"
                     | "gif"

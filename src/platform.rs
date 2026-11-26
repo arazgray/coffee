@@ -75,19 +75,39 @@ pub fn libmpv_paths() -> Vec<OsString> {
     }
     #[cfg(windows)]
     {
-        let root = env::var_os("MSYS2_ROOT").unwrap_or_else(|| r"C:\msys64".into());
-        vec![
-            std::path::PathBuf::from(root)
-                .join(r"ucrt64\bin\libmpv-2.dll")
-                .into_os_string(),
-            "libmpv-2.dll".into(),
-            "mpv-2.dll".into(),
-        ]
+        windows_provider_paths("libmpv-2.dll")
     }
     #[cfg(target_os = "linux")]
     {
         vec!["libmpv.so.2".into()]
     }
+}
+
+pub fn libheif_paths() -> Vec<OsString> {
+    #[cfg(target_os = "linux")]
+    return vec!["libheif.so.1".into()];
+    #[cfg(target_os = "macos")]
+    return vec![
+        "/opt/homebrew/opt/libheif/lib/libheif.1.dylib".into(),
+        "/usr/local/opt/libheif/lib/libheif.1.dylib".into(),
+        "libheif.1.dylib".into(),
+    ];
+    #[cfg(windows)]
+    return windows_provider_paths("libheif.dll");
+}
+
+#[cfg(windows)]
+fn windows_provider_paths(name: &str) -> Vec<OsString> {
+    let root = env::var_os("MSYS2_ROOT").unwrap_or_else(|| r"C:\msys64".into());
+    let sys = std::path::PathBuf::from(root)
+        .join(r"ucrt64\bin")
+        .join(name);
+    env::current_exe()
+        .ok()
+        .and_then(|path| Some(path.parent()?.join(name).into_os_string()))
+        .into_iter()
+        .chain([sys.into_os_string()])
+        .collect()
 }
 
 #[cfg(windows)]

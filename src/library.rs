@@ -30,6 +30,9 @@ pub fn normalize(input: &str) -> Option<String> {
             _ => return None,
         }
     }
+    if input.contains("://") {
+        return None;
+    }
     let absolute = std::env::current_dir().ok()?.join(path);
     Some(absolute.to_string_lossy().into_owned())
 }
@@ -104,5 +107,6 @@ mod tests {
             "https://example.org/media.m3u8"
         );
         assert!(normalize("javascript:alert(1)").is_none());
+        assert!(normalize("https://").is_none());
     }
 }

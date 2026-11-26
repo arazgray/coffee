@@ -1,6 +1,7 @@
 use crate::{library, state::image_path};
 use std::{
     cmp::Ordering,
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -8,7 +9,7 @@ use std::{
 pub struct PhotoFolder {
     files: Vec<PathBuf>,
     pub index: usize,
-    pub live_clip: Option<PathBuf>,
+    clips: HashMap<String, Vec<PathBuf>>,
 }
 
 impl PhotoFolder {
@@ -17,9 +18,8 @@ impl PhotoFolder {
         if !file.is_absolute() {
             return None;
         }
-        let stem = file.file_stem()?.to_string_lossy();
         let mut files = Vec::new();
-        let mut live_clip = None;
+        let mut clips = HashMap::<_, Vec<_>>::new();
         for entry in fs::read_dir(file.parent()?).ok()?.flatten() {
             let path = entry.path();
             if image_path(&path.to_string_lossy()) && path.is_file() {
@@ -27,38 +27,101 @@ impl PhotoFolder {
             } else if path
                 .extension()
                 .is_some_and(|s| s.eq_ignore_ascii_case("mov"))
-                && path
-                    .file_stem()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(stem.as_ref()))
                 && path.is_file()
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
             {
-                // Prefer the same spelling when case-sensitive folders
-                // contain more than one possible companion.
-                if live_clip.is_none() || path.file_stem() == file.file_stem() {
-                    live_clip = Some(path);
-                }
+                clips
+                    .entry(stem.to_ascii_lowercase())
+                    .or_default()
+                    .push(path);
             }
         }
         files.sort_unstable_by(|a, b| natural_order(&name(a), &name(b)));
-        let index = files.iter().position(|path| path == &file).or_else(|| {
-            files
-                .iter()
-                .position(|path| path.file_name() == file.file_name())
-        })?;
-        Some(Self {
+        let mut folder = Self {
             files,
-            index,
-            live_clip,
-        })
+            index: 0,
+            clips,
+        };
+        folder.select(&file).then_some(folder)
     }
 
-    pub fn len(&self) -> usize {
-        self.files.len()
+    pub fn select(&mut self, file: &Path) -> bool {
+        let Some(index) = self.files.iter().position(|path| path == file).or_else(|| {
+            // File names are case-insensitive on Windows and on most Macs.
+            #[cfg(any(windows, target_os = "macos"))]
+            if self
+                .files
+                .first()
+                .is_some_and(|first| first.parent() == file.parent())
+            {
+                return self
+                    .files
+                    .iter()
+                    .position(|path| name(path).eq_ignore_ascii_case(&name(file)));
+            }
+            None
+        }) else {
+            return false;
+        };
+        self.index = index;
+        true
+    }
+
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    pub fn live_clip(&self) -> Option<&Path> {
+        let stem = self.files.get(self.index)?.file_stem()?.to_str()?;
+        self.clips
+            .get(&stem.to_ascii_lowercase())?
+            .iter()
+            // Prefer exact stem spelling, with a deterministic tie-breaker.
+            .min_by_key(|path| {
+                (
+                    path.file_stem().and_then(|s| s.to_str()) != Some(stem),
+                    *path,
+                )
+            })
+            .map(PathBuf::as_path)
     }
 
     pub fn adjacent(&self, direction: i32) -> Option<&Path> {
         let index = self.index.checked_add_signed(direction as isize)?;
         self.files.get(index).map(PathBuf::as_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scans_image_siblings_and_matches_only_same_stem_movs() {
+        let dir = std::env::temp_dir().join(format!("coffee-photos-test-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        for name in [
+            "IMG_2.jpg",
+            "IMG_3.HEIC",
+            "IMG_10.qoi",
+            "img_3.MoV",
+            "IMG_2.mp4",
+            "other.mov",
+        ] {
+            fs::write(dir.join(name), []).unwrap();
+        }
+        fs::create_dir(dir.join("not-a-file.png")).unwrap();
+        let still = dir.join("IMG_3.HEIC");
+        let mut folder = PhotoFolder::scan(still.to_str().unwrap()).unwrap();
+        assert_eq!(folder.files().len(), 3);
+        assert_eq!(folder.index, 1);
+        assert_eq!(folder.adjacent(-1), Some(dir.join("IMG_2.jpg").as_path()));
+        assert_eq!(folder.adjacent(1), Some(dir.join("IMG_10.qoi").as_path()));
+        assert_eq!(folder.live_clip(), Some(dir.join("img_3.MoV").as_path()));
+        assert!(folder.select(&dir.join("IMG_2.jpg")));
+        assert!(folder.live_clip().is_none());
+        assert!(folder.adjacent(-1).is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 

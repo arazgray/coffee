@@ -22,6 +22,7 @@ Section: video
 Priority: optional
 Architecture: $deb_arch
 Depends: libc6 (>= 2.39), libmpv2 (>= 0.41), kdialog, xdg-utils
+Recommends: libheif1, libheif-plugin-libde265
 Maintainer: Araz Gray
 Homepage: https://github.com/arazgray/coffee
 Description: Coffee native media player

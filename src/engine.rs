@@ -3,6 +3,7 @@
 use libloading::Library;
 use serde_json::{Map, Value};
 use std::{
+    cell::RefCell,
     ffi::{CStr, CString, c_char, c_int, c_void},
     os::raw::c_double,
     path::Path,
@@ -56,6 +57,12 @@ struct EndFile {
     playlist_entry_id: i64,
 }
 
+#[repr(C)]
+struct Hook {
+    _name: *const c_char,
+    id: u64,
+}
+
 pub enum Event {
     Shutdown,
     Start(i64),
@@ -90,6 +97,8 @@ struct Api {
     observe_property: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
     free_node_contents: unsafe extern "C" fn(*mut Node),
     wait_event: unsafe extern "C" fn(Handle, c_double) -> *mut MpvEvent,
+    hook_add: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
+    hook_continue: unsafe extern "C" fn(Handle, u64) -> c_int,
     error_string: unsafe extern "C" fn(c_int) -> *const c_char,
 }
 
@@ -123,6 +132,8 @@ impl Api {
                 observe_property: symbol!("mpv_observe_property"),
                 free_node_contents: symbol!("mpv_free_node_contents"),
                 wait_event: symbol!("mpv_wait_event"),
+                hook_add: symbol!("mpv_hook_add"),
+                hook_continue: symbol!("mpv_hook_continue"),
                 error_string: symbol!("mpv_error_string"),
                 _lib: lib,
             })
@@ -134,7 +145,7 @@ impl Api {
     }
 }
 
-fn load_provider(path: &std::ffi::OsStr) -> Result<Library, libloading::Error> {
+pub(crate) fn load_provider(path: &std::ffi::OsStr) -> Result<Library, libloading::Error> {
     #[cfg(windows)]
     if Path::new(path).is_absolute() {
         // Search the dependency's install directory and trusted loader
@@ -203,6 +214,7 @@ unsafe fn to_value(node: &Node) -> Value {
 pub struct Engine {
     api: Api,
     handle: Handle,
+    image_source: RefCell<Option<tempfile::NamedTempFile>>,
 }
 
 impl Engine {
@@ -216,7 +228,11 @@ impl Engine {
         if handle.is_null() {
             return Err("libmpv could not create a client".into());
         }
-        let mpv = Self { api, handle };
+        let mpv = Self {
+            api,
+            handle,
+            image_source: RefCell::new(None),
+        };
         let options = [
             ("config", "no"),
             ("terminal", "yes"),
@@ -262,7 +278,14 @@ impl Engine {
                 // The compositor provides resize cursors for a decorated
                 // Wayland window. X11 can keep the border without a title bar.
                 ("border", "yes"),
-                ("title-bar", "no"),
+                (
+                    "title-bar",
+                    if cfg!(any(windows, target_os = "macos")) {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                ),
                 ("window-dragging", "yes"),
                 ("input-builtin-dragging", "no"),
                 ("input-doubleclick-time", "0"),
@@ -297,10 +320,13 @@ impl Engine {
         }
         let code = unsafe { (mpv.api.initialize)(mpv.handle) };
         if code < 0 {
-            Err(mpv.api.error(code))
-        } else {
-            Ok(mpv)
+            return Err(mpv.api.error(code));
         }
+        let hook = unsafe { (mpv.api.hook_add)(mpv.handle, 0, c"on_load".as_ptr(), 50) };
+        if hook < 0 {
+            return Err(mpv.api.error(hook));
+        }
+        Ok(mpv)
     }
 
     fn option(&self, key: &str, value: &str) -> Result<(), String> {
@@ -417,8 +443,43 @@ impl Engine {
                 }
             }
             22 if event.reply_userdata == PLAYLIST_OBSERVER => Event::PlaylistChanged,
+            25 => {
+                let id = unsafe { event.data.cast::<Hook>().as_ref()?.id };
+                self.prepare_image_source();
+                unsafe { (self.api.hook_continue)(self.handle, id) };
+                Event::Changed
+            }
             _ => Event::Changed,
         })
+    }
+
+    fn prepare_image_source(&self) {
+        self.image_source.replace(None);
+        let source = self.get("stream-open-filename");
+        let Some(path) = source.as_str() else { return };
+        let path = Path::new(path);
+        let media = crate::image_source::animated_webp(path).and_then(|value| {
+            if value.is_none() {
+                crate::heif_source::tiled_heif(path)
+            } else {
+                Ok(value)
+            }
+        });
+        match media {
+            Ok(Some(preview)) => {
+                if self
+                    .set("stream-open-filename", &preview.path().to_string_lossy())
+                    .is_ok()
+                {
+                    if preview.path().extension().is_some_and(|ext| ext == "apng") {
+                        let _ = self.set("file-local-options/demuxer-lavf-o", "ignore_loop=0");
+                    }
+                    self.image_source.replace(Some(preview));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("{error}"),
+        }
     }
 }
 

@@ -18,13 +18,22 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
       - run: cargo build --locked --release
       - run: sudo apt-get update && sudo apt-get install -y rpm
       - run: sh packaging/linux.sh
-      - uses: actions/upload-artifact@v4
+      - name: Test the Linux package on Ubuntu 26.04
+        run: |
+          docker run --rm -v "$PWD:/coffee:ro" ubuntu:26.04 sh -ec '
+            apt-get -qq update
+            DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends /coffee/dist/*.deb libheif-plugin-libde265
+            coffee --smoke-test /coffee/tests/fixtures/animated.webp
+            output=$(coffee --smoke-test /coffee/tests/fixtures/grid.heic)
+            printf "%s\n" "$output" | grep -F "128 × 96"
+          '
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -33,7 +42,7 @@ jobs:
   windows:
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
       - run: cargo build --locked --release
@@ -41,11 +50,10 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: mingw-w64-ucrt-x86_64-mpv
+          install: mingw-w64-ucrt-x86_64-mpv mingw-w64-ucrt-x86_64-libheif
       - shell: msys2 {0}
         run: |
-          export COFFEE_LIBMPV="$(cygpath -w /ucrt64/bin/libmpv-2.dll)"
-          ./target/release/coffee.exe --smoke-test assets/icon.png
+          echo "MSYS2_ROOT=$(cygpath -w /)" >> "$GITHUB_ENV"
       - shell: pwsh
         run: |
           $Version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
@@ -53,7 +61,17 @@ jobs:
           Copy-Item target/release/coffee.exe staging/Coffee.exe
           Copy-Item -Path README.md, LICENSE, assets/LUCIDE-LICENSE -Destination staging/
           Compress-Archive -Path staging/* -DestinationPath "dist/coffee-${Version}-windows-x86_64.zip"
-      - uses: actions/upload-artifact@v4
+      - name: Decode media with the packaged Windows executable
+        shell: pwsh
+        run: |
+          Expand-Archive -Path (Get-ChildItem dist/*.zip).FullName -DestinationPath installed
+          foreach ($Fixture in 'animated.webp', 'grid.heic') {
+            $Result = Start-Process installed/Coffee.exe -ArgumentList '--smoke-test', "tests/fixtures/$Fixture" -Wait -PassThru -RedirectStandardOutput smoke.log
+            Get-Content smoke.log
+            if ($Result.ExitCode -ne 0) { exit $Result.ExitCode }
+            if ($Fixture -eq 'grid.heic' -and -not (Select-String -Quiet -Path smoke.log -Pattern '128 × 96')) { exit 1 }
+          }
+      - uses: actions/upload-artifact@v6
         with:
           name: windows-x86_64
           path: dist/*
@@ -70,14 +88,20 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
       - run: cargo build --locked --release
-      - run: brew install mpv
-      - run: ./target/release/coffee --smoke-test assets/icon.png
+      - run: brew install mpv libheif
       - run: sh packaging/macos.sh
-      - uses: actions/upload-artifact@v4
+      - name: Decode media with Coffee.app
+        run: |
+          ditto -x -k dist/*.zip installed
+          codesign --verify --strict installed/Coffee.app
+          installed/Coffee.app/Contents/MacOS/Coffee --smoke-test tests/fixtures/animated.webp
+          output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test tests/fixtures/grid.heic)
+          printf '%s\n' "$output" | grep -F '128 × 96'
+      - uses: actions/upload-artifact@v6
         with:
           name: macos-${{ matrix.arch }}
           path: dist/*
