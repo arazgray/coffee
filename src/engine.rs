@@ -3,7 +3,7 @@
 use libloading::Library;
 use serde_json::{Map, Value};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::{CStr, CString, c_char, c_int, c_void},
     os::raw::c_double,
     path::{Path, PathBuf},
@@ -75,7 +75,6 @@ pub enum Event {
     Start(i64),
     Loaded,
     FrameReady,
-    SnapshotReady(u64, Option<Snapshot>),
     End {
         id: i64,
         eof: bool,
@@ -103,7 +102,6 @@ struct Api {
     set_option_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     command: unsafe extern "C" fn(Handle, *const *const c_char) -> c_int,
     command_ret: unsafe extern "C" fn(Handle, *const *const c_char, *mut Node) -> c_int,
-    command_async: unsafe extern "C" fn(Handle, u64, *const *const c_char) -> c_int,
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     observe_property: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
     free_node_contents: unsafe extern "C" fn(*mut Node),
@@ -142,7 +140,6 @@ impl Api {
                 set_option_string: symbol!("mpv_set_option_string"),
                 command: symbol!("mpv_command"),
                 command_ret: symbol!("mpv_command_ret"),
-                command_async: symbol!("mpv_command_async"),
                 get_property: symbol!("mpv_get_property"),
                 observe_property: symbol!("mpv_observe_property"),
                 free_node_contents: symbol!("mpv_free_node_contents"),
@@ -231,8 +228,15 @@ pub struct Engine {
     api: Api,
     handle: Handle,
     image_source: RefCell<Option<tempfile::NamedTempFile>>,
-    cache: crate::preload::Cache,
+    cache: Option<crate::preload::Cache>,
     stream_slot: Box<crate::preload::StreamSlot>,
+    photo_zoom: Cell<crate::state::PhotoZoom>,
+}
+
+enum Output {
+    Window,
+    Test,
+    Soundtrack,
 }
 
 pub struct Snapshot {
@@ -254,6 +258,30 @@ impl Engine {
         headless: bool,
         vulkan_device: Option<&str>,
     ) -> Result<Self, String> {
+        Self::create_with_output(
+            input_conf,
+            if headless {
+                Output::Test
+            } else {
+                Output::Window
+            },
+            vulkan_device,
+        )
+    }
+
+    pub fn soundtrack(path: &str, volume: f64, muted: bool) -> Result<Self, String> {
+        let mpv = Self::create_with_output(None, Output::Soundtrack, None)?;
+        mpv.set("volume", &volume.to_string())?;
+        mpv.set("mute", if muted { "yes" } else { "no" })?;
+        mpv.command(&["loadfile", path])?;
+        Ok(mpv)
+    }
+
+    fn create_with_output(
+        input_conf: Option<&Path>,
+        output: Output,
+        vulkan_device: Option<&str>,
+    ) -> Result<Self, String> {
         let api = Api::load()?;
         let handle = unsafe { (api.create)() };
         if handle.is_null() {
@@ -263,8 +291,9 @@ impl Engine {
             api,
             handle,
             image_source: RefCell::new(None),
-            cache: crate::preload::Cache::new(),
+            cache: (!matches!(output, Output::Soundtrack)).then(crate::preload::Cache::new),
             stream_slot: Box::default(),
+            photo_zoom: Cell::default(),
         };
         let options = [
             ("config", "no"),
@@ -292,8 +321,19 @@ impl Engine {
         for (key, value) in options {
             mpv.option(key, value)?;
         }
-        if headless {
+        if matches!(output, Output::Test) {
             for (key, value) in [("vo", "null"), ("ao", "null"), ("pause", "yes")] {
+                mpv.option(key, value)?;
+            }
+        } else if matches!(output, Output::Soundtrack) {
+            for (key, value) in [
+                ("vo", "null"),
+                ("vid", "no"),
+                ("keep-open", "no"),
+                ("loop-file", "inf"),
+                ("terminal", "no"),
+                ("audio-client-name", "Coffee Slideshow"),
+            ] {
                 mpv.option(key, value)?;
             }
         } else {
@@ -355,6 +395,9 @@ impl Engine {
         if code < 0 {
             return Err(mpv.api.error(code));
         }
+        if matches!(output, Output::Soundtrack) {
+            return Ok(mpv);
+        }
         let stream = unsafe {
             (mpv.api.stream_add)(
                 mpv.handle,
@@ -406,11 +449,31 @@ impl Engine {
     }
 
     pub fn preload(&self, files: Vec<PathBuf>) {
-        self.cache.plan(files);
+        if let Some(cache) = &self.cache {
+            cache.plan(files);
+        }
     }
 
     pub fn is_preloaded(&self, path: &Path) -> bool {
-        self.cache.get(path).is_some()
+        self.cache
+            .as_ref()
+            .is_some_and(|cache| cache.get(path).is_some())
+    }
+
+    pub fn photo_zoom(&self, zoom: crate::state::PhotoZoom, apply_now: bool) -> Result<(), String> {
+        self.photo_zoom.set(zoom);
+        if apply_now {
+            self.apply_photo_zoom()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn apply_photo_zoom(&self) -> Result<(), String> {
+        for (key, value) in self.photo_zoom.get().options() {
+            self.set(&format!("file-local-options/{key}"), value)?;
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Option<Snapshot> {
@@ -433,10 +496,6 @@ impl Engine {
         let snapshot = unsafe { copy_snapshot(&out) };
         unsafe { (self.api.free_node_contents)(&mut out) };
         snapshot
-    }
-
-    pub fn request_snapshot(&self, request: u64) {
-        unsafe { (self.api.command_async)(self.handle, request, SNAPSHOT_ARGS.as_ptr()) };
     }
 
     pub fn crossfade_bitmap(&self, shot: &Snapshot, pixels: &[u8], display: (i32, i32)) -> bool {
@@ -503,20 +562,6 @@ impl Engine {
         Some(match event.id {
             0 => return None,
             1 => Event::Shutdown,
-            5 => Event::SnapshotReady(
-                event.reply_userdata,
-                if event.error >= 0 {
-                    unsafe {
-                        event
-                            .data
-                            .cast::<Node>()
-                            .as_ref()
-                            .and_then(|node| copy_snapshot(node))
-                    }
-                } else {
-                    None
-                },
-            ),
             6 => Event::Start(unsafe { *event.data.cast::<i64>().as_ref()? }),
             7 => {
                 let end = unsafe { event.data.cast::<EndFile>().as_ref()? };
@@ -573,8 +618,11 @@ impl Engine {
         self.stream_slot.clear();
         let source = self.get("stream-open-filename");
         let Some(path) = source.as_str() else { return };
+        if crate::state::image_path(path) && self.photo_zoom.get() != crate::state::PhotoZoom::Fit {
+            let _ = self.apply_photo_zoom();
+        }
         let path = Path::new(path);
-        if let Some(asset) = self.cache.get(path) {
+        if let Some(asset) = self.cache.as_ref().and_then(|cache| cache.get(path)) {
             let animated_webp = asset.animated_webp;
             let uri = self.stream_slot.stage(asset);
             if self.set("stream-open-filename", &uri).is_ok() {

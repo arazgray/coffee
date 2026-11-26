@@ -14,10 +14,10 @@ mod state;
 mod ui;
 
 use crossfade::Crossfade;
-use engine::{Engine, Event, PointerEvent, Snapshot};
+use engine::{Engine, Event, PointerEvent};
 use gpu::{DecodeChoice, Devices};
 use photos::PhotoFolder;
-use state::{Hdr, Kind, Media, RenderMode, display_name, image_path, is_stream};
+use state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, image_path, is_stream};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 use std::{
@@ -42,6 +42,7 @@ use ui::{Action, Frame, Menu, View};
 enum Picker {
     Files,
     Add,
+    SlideshowMusic,
     Subtitles,
     Save,
     Load,
@@ -196,6 +197,13 @@ impl Timings {
 struct LivePreview {
     photo_id: i64,
     clip_id: i64,
+}
+
+const SLIDE_INTERVAL: Duration = Duration::from_secs(5);
+
+struct Slideshow {
+    next: Instant,
+    music: Option<Engine>,
 }
 
 struct StreamInput {
@@ -384,10 +392,10 @@ struct App {
     recent: PathBuf,
     fade: Option<Crossfade>,
     active_file: Option<i64>,
-    ready_still: bool,
-    still_snapshot: Option<Snapshot>,
-    capture_attempt: Option<(i32, i32)>,
-    capture_request: u64,
+    photo_switch: Option<(i64, usize)>,
+    zoom: PhotoZoom,
+    slideshow: Option<Slideshow>,
+    slideshow_music: Option<String>,
     photos: Option<PhotoFolder>,
     live: Option<LivePreview>,
     stream: Option<StreamInput>,
@@ -436,7 +444,10 @@ impl App {
         };
         let result = match key {
             "stream-submit" => self.submit_stream(),
-            "stream-cancel" => self.stream_dialog(true),
+            "stream-cancel" => {
+                self.stop_slideshow();
+                self.stream_dialog(true)
+            }
             "stream-paste" => {
                 let paste = self.mpv.get("clipboard/text");
                 if let Some(text) = paste.as_str() {
@@ -483,6 +494,11 @@ impl App {
     }
 
     fn refresh_media(&mut self) {
+        if self.photo_switch.is_some() {
+            // Keep the outgoing photo HUD until mpv has loaded the new
+            // item. Several properties can become empty in between.
+            return;
+        }
         self.media = Media::read(&self.mpv);
         if let Err(error) = self.update_render_profile() {
             self.note(error);
@@ -502,6 +518,8 @@ impl App {
         let mut valid = paths.iter().filter_map(|p| library::normalize(p));
         if let Some(first) = valid.next() {
             if !append {
+                self.stop_slideshow();
+                self.photo_switch = None;
                 self.photos = None;
                 self.clear_crossfade();
                 self.finish_live(false);
@@ -588,6 +606,8 @@ impl App {
         // playlist; otherwise select the first new entry without replacing
         // the existing queue. Batch the notifications for multi-file drops.
         if let Some(index) = before.first_drop(&self.queue_snapshot) {
+            self.stop_slideshow();
+            self.photo_switch = None;
             self.clear_crossfade();
             self.pending_click = None;
             if let Err(error) = self
@@ -614,15 +634,17 @@ impl App {
     }
 
     fn next(&mut self, direction: i32) {
-        // mpv sets the playlist position before it emits FILE_LOADED. Use
-        // the selected entry so fast key presses don't skip folder items.
-        self.refresh_media();
+        // Use the already selected entry, even mid-load. Avoid a full
+        // metadata refresh or GPU readback on the navigation hot path.
+        let current = self.photo_switch.map(|(_, index)| index).or_else(|| {
+            self.mpv
+                .get("playlist-pos")
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+        });
         if self.media.kind == Kind::Image
             && let Some(folder) = &mut self.photos
-            && let Some(path) = self
-                .media
-                .index
-                .and_then(|index| self.media.playlist.get(index))
+            && let Some(path) = current.and_then(|index| self.media.playlist.get(index))
             && folder.select(Path::new(path))
         {
             let Some(path) = folder
@@ -631,28 +653,12 @@ impl App {
             else {
                 return;
             };
-            let existing = self
-                .media
-                .playlist
-                .iter()
-                .position(|entry| library::normalize(entry).is_some_and(|entry| entry == path));
-            let index = match existing {
-                Some(index) => index,
-                None => {
-                    let index = QueueSnapshot::read(&self.mpv).ids.len();
-                    if let Err(error) = self.mpv.command(&["loadfile", &path, "append"]) {
-                        self.note(error);
-                        return;
-                    }
-                    self.queue_snapshot = QueueSnapshot::read(&self.mpv);
-                    self.refresh_media();
-                    index
-                }
-            };
-            self.jump(index);
+            if let Err(error) = self.select_photo(path) {
+                self.note(error);
+            }
             return;
         }
-        let Some(index) = self.media.index else {
+        let Some(index) = current else {
             return;
         };
         let next = (index as i64 + i64::from(direction))
@@ -660,13 +666,111 @@ impl App {
             .ok()
             .filter(|i: &usize| *i < self.media.playlist.len());
         if let Some(index) = next {
-            self.jump(index);
+            if let Err(error) = self.play_index(index) {
+                self.note(error);
+            }
         } else if self.media.kind == Kind::Image {
             self.note(if direction < 0 {
                 "First image in the folder."
             } else {
                 "Last image in the folder."
             });
+        }
+    }
+
+    fn select_photo(&mut self, path: String) -> Result<(), String> {
+        let index = if let Some(index) = self.media.playlist.iter().position(|entry| entry == &path)
+        {
+            index
+        } else {
+            self.mpv.command(&["loadfile", &path, "append"])?;
+            self.queue_snapshot = QueueSnapshot::read(&self.mpv);
+            self.media.playlist.push(path);
+            self.queue_snapshot
+                .ids
+                .len()
+                .checked_sub(1)
+                .ok_or("Could not queue photo")?
+        };
+        self.play_index(index)
+    }
+
+    fn start_slideshow(&mut self) -> Result<(), String> {
+        if self.media.kind != Kind::Image
+            || self.photos.is_none()
+            || self.picker
+            || self.slideshow.is_some()
+        {
+            return Ok(());
+        }
+        self.mpv.set("fullscreen", "yes")?;
+        self.menu = None;
+        let mut music = None;
+        if let Some(path) = &self.slideshow_music {
+            match Engine::soundtrack(path, self.timing.volume, self.timing.muted) {
+                Ok(player) => music = Some(player),
+                Err(error) => self.note(format!("Couldn’t start slideshow music: {error}")),
+            }
+        }
+        self.slideshow = Some(Slideshow {
+            next: Instant::now() + SLIDE_INTERVAL,
+            music,
+        });
+        Ok(())
+    }
+
+    fn stop_slideshow(&mut self) {
+        if self.slideshow.take().is_some() {
+            self.menu = None;
+            let _ = self.mpv.set("fullscreen", "no");
+        }
+    }
+
+    fn audio_controls(&self) -> &Engine {
+        self.slideshow
+            .as_ref()
+            .and_then(|slideshow| slideshow.music.as_ref())
+            .unwrap_or(&self.mpv)
+    }
+
+    fn tick_slideshow(&mut self) {
+        let Some(slideshow) = &mut self.slideshow else {
+            return;
+        };
+        if let Some(mpv) = &slideshow.music {
+            let mut failed = None;
+            for _ in 0..8 {
+                match mpv.event(0.0) {
+                    Some(Event::End {
+                        error: Some(error), ..
+                    }) => {
+                        failed = Some(error);
+                        break;
+                    }
+                    Some(Event::Shutdown) => {
+                        failed = Some("audio player stopped".into());
+                        break;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            if let Some(error) = failed {
+                slideshow.music = None;
+                self.note(format!("Couldn’t play slideshow music: {error}"));
+                return;
+            }
+        }
+        if self.photo_switch.is_some() || self.live.is_some() || Instant::now() < slideshow.next {
+            return;
+        }
+        slideshow.next = Instant::now() + SLIDE_INTERVAL;
+        if let Some(path) = self.photos.as_ref().and_then(PhotoFolder::next_slide) {
+            let path = path.to_string_lossy().into_owned();
+            if let Err(error) = self.select_photo(path) {
+                self.stop_slideshow();
+                self.note(error);
+            }
         }
     }
 
@@ -679,7 +783,7 @@ impl App {
             .photos
             .as_ref()
             .and_then(PhotoFolder::live_clip)
-            .filter(|_| self.media.kind == Kind::Image)
+            .filter(|_| self.media.kind == Kind::Image && self.photo_switch.is_none())
             .ok_or("No Live Photo clip")?;
         let queue = QueueSnapshot::read(&self.mpv);
         let photo_id = queue.current.ok_or("No active photo")?;
@@ -722,36 +826,36 @@ impl App {
         self.queue_snapshot = QueueSnapshot::read(&self.mpv);
     }
 
-    fn jump(&mut self, index: usize) {
-        if self.media.kind == Kind::Image
-            && self
-                .media
-                .playlist
-                .get(index)
-                .is_some_and(|path| image_path(path))
-            && Some(index) != self.media.index
-        {
-            if let Some(&id) = QueueSnapshot::read(&self.mpv).ids.get(index)
-                && let Err(error) = self.crossfade_to(index, id)
-            {
-                self.note(error);
-            }
+    fn play_index(&mut self, index: usize) -> Result<(), String> {
+        let photo = self
+            .media
+            .playlist
+            .get(index)
+            .is_some_and(|path| image_path(path));
+        let pending = if photo && self.media.kind == Kind::Image {
+            self.mpv
+                .get(&format!("playlist/{index}/id"))
+                .as_i64()
+                .map(|id| (id, index))
         } else {
-            self.clear_crossfade();
-            let _ = self
-                .mpv
-                .command(&["playlist-play-index", &index.to_string()]);
-            let _ = self.mpv.set("pause", "no");
+            None
+        };
+        if !photo {
+            self.stop_slideshow();
         }
+        self.clear_crossfade();
+        self.mpv
+            .command(&["playlist-play-index", &index.to_string()])?;
+        self.photo_switch = pending;
+        if self.timing.paused {
+            self.mpv.set("pause", "no")?;
+        }
+        Ok(())
     }
 
     fn crossfade_to(&mut self, index: usize, id: i64) -> Result<(), String> {
         let display = self.timing.dimensions;
-        let snapshot = self
-            .still_snapshot
-            .take()
-            .filter(|shot| (shot.width as i32, shot.height as i32) == display);
-        self.fade = Crossfade::begin(&self.mpv, id, display, self.fade.take(), snapshot);
+        self.fade = Crossfade::begin(&self.mpv, id, display, self.fade.take());
         if self.fade.is_none() {
             let _ = self.mpv.command(&["overlay-remove", "1"]);
         }
@@ -768,19 +872,6 @@ impl App {
     fn clear_crossfade(&mut self) {
         if self.fade.take().is_some() {
             let _ = self.mpv.command(&["overlay-remove", "1"]);
-        }
-    }
-
-    fn capture_still(&mut self, dimensions: (i32, i32)) {
-        if self.ready_still
-            && self.fade.is_none()
-            && self.capture_attempt != Some(dimensions)
-            && u64::try_from(i64::from(dimensions.0) * i64::from(dimensions.1))
-                .is_ok_and(|pixels| (1..=16 * 1024 * 1024).contains(&pixels))
-        {
-            self.capture_attempt = Some(dimensions);
-            self.capture_request = self.capture_request.wrapping_add(1);
-            self.mpv.request_snapshot(self.capture_request);
         }
     }
 
@@ -810,6 +901,12 @@ impl App {
                             .arg("--getopenfilename")
                             .arg(&recent)
                             .arg("*.srt *.vtt *.ass *.ssa *.sub|Subtitle files");
+                    }
+                    Picker::SlideshowMusic => {
+                        dialog.arg("--getopenfilename").arg(&recent).arg(format!(
+                            "{}|Audio files\n*|All files",
+                            platform::audio_filter()
+                        ));
                     }
                     Picker::Save => {
                         dialog
@@ -866,6 +963,13 @@ impl App {
                             self.note(e);
                         }
                     }
+                    Picker::SlideshowMusic => {
+                        if let Some(path) =
+                            library::normalize(&value).filter(|path| Path::new(path).is_file())
+                        {
+                            self.slideshow_music = Some(path);
+                        }
+                    }
                     Picker::Save => {
                         let playlist = library::Playlist {
                             files: self.media.playlist.clone(),
@@ -894,6 +998,10 @@ impl App {
                 return;
             }
             Action::Escape => {
+                if self.slideshow.is_some() {
+                    self.stop_slideshow();
+                    return;
+                }
                 if self.menu.take().is_some() {
                     return;
                 }
@@ -965,6 +1073,23 @@ impl App {
                 return;
             }
             Action::LivePhoto => self.live_photo(),
+            Action::PhotoZoom(zoom) => {
+                self.zoom = zoom;
+                self.mpv.photo_zoom(zoom, self.media.kind == Kind::Image)
+            }
+            Action::SlideshowMusic => {
+                self.choose(Picker::SlideshowMusic);
+                return;
+            }
+            Action::ClearSlideshowMusic => {
+                self.slideshow_music = None;
+                Ok(())
+            }
+            Action::StartSlideshow => self.start_slideshow(),
+            Action::StopSlideshow => {
+                self.stop_slideshow();
+                Ok(())
+            }
             Action::Next => {
                 self.next(1);
                 return;
@@ -985,12 +1110,13 @@ impl App {
                     .command(&["seek", &(part * 100.0).to_string(), "absolute-percent"])
             }
             Action::Mute => {
-                if self.mpv.get("volume").as_f64() == Some(0.0) {
-                    self.mpv
+                let audio = self.audio_controls();
+                if audio.get("volume").as_f64() == Some(0.0) {
+                    audio
                         .set("volume", &self.last_volume.to_string())
-                        .and_then(|()| self.mpv.set("mute", "no"))
+                        .and_then(|()| audio.set("mute", "no"))
                 } else {
-                    self.mpv.command(&["cycle", "mute"])
+                    audio.command(&["cycle", "mute"])
                 }
             }
             Action::Volume(delta) => {
@@ -1000,12 +1126,13 @@ impl App {
                         .saturating_add_signed(-(delta.signum() as isize));
                     return;
                 }
-                self.mpv.command(&["add", "volume", &delta.to_string()])
+                self.audio_controls()
+                    .command(&["add", "volume", &delta.to_string()])
             }
             Action::SetVolume(percent) => self
-                .mpv
+                .audio_controls()
                 .set("volume", &percent.to_string())
-                .and_then(|()| self.mpv.set("mute", "no"))
+                .and_then(|()| self.audio_controls().set("mute", "no"))
                 .map(|()| {
                     if percent > 0 {
                         self.last_volume = f64::from(percent);
@@ -1029,8 +1156,6 @@ impl App {
             }
             Action::Hdr(mode) => mode.apply(&self.mpv).map(|()| {
                 self.hdr = mode;
-                self.still_snapshot = None;
-                self.capture_attempt = None;
             }),
             Action::Decode(choice) => {
                 if self.decoder == choice && env::var_os("KAHVE_HWDEC").is_none() {
@@ -1049,19 +1174,23 @@ impl App {
             }
             Action::Fullscreen => {
                 self.menu = None;
-                self.mpv.command(&["cycle", "fullscreen"])
+                if self.slideshow.is_some() {
+                    self.stop_slideshow();
+                    Ok(())
+                } else {
+                    self.mpv.command(&["cycle", "fullscreen"])
+                }
             }
             Action::Minimize => self.mpv.set("window-minimized", "yes"),
             Action::Maximize => self.mpv.command(&["cycle", "window-maximized"]),
             Action::Quit => self.mpv.command(&["quit"]),
             Action::Clear => {
+                self.stop_slideshow();
+                self.photo_switch = None;
                 let _ = self.mpv.command(&["playlist-clear"]);
                 self.mpv.command(&["stop"])
             }
-            Action::Jump(index) => {
-                self.jump(index);
-                return;
-            }
+            Action::Jump(index) => self.play_index(index),
             Action::Remove(index) => self.mpv.command(&["playlist-remove", &index.to_string()]),
             Action::Scroll(delta) => {
                 self.scroll = self.scroll.saturating_add_signed(delta as isize);
@@ -1090,7 +1219,9 @@ impl App {
 
     fn click(&mut self, action: Action, point: (i32, i32)) {
         let area = match action {
-            Action::ClickStage if self.media.kind == Kind::Video => Some(ClickArea::Video),
+            Action::ClickStage if matches!(self.media.kind, Kind::Video | Kind::Image) => {
+                Some(ClickArea::Video)
+            }
             Action::DragWindow if !self.timing.fullscreen => Some(ClickArea::TopBar),
             Action::ClickBar if !self.timing.fullscreen => Some(ClickArea::BottomBar),
             _ => None,
@@ -1208,10 +1339,6 @@ impl App {
             Event::Shutdown => return false,
             Event::Start(id) => {
                 self.active_file = Some(id);
-                self.ready_still = false;
-                self.still_snapshot = None;
-                self.capture_attempt = None;
-                self.capture_request = self.capture_request.wrapping_add(1);
                 if self.fade.as_ref().is_some_and(|fade| fade.target != id)
                     && QueueSnapshot::read(&self.mpv).current == Some(id)
                 {
@@ -1226,10 +1353,22 @@ impl App {
                 self.hovered = Instant::now();
             }
             Event::Loaded => {
+                if let Some((target, _)) = self.photo_switch {
+                    if self.active_file != Some(target) {
+                        return true;
+                    }
+                    self.photo_switch = None;
+                }
                 self.pending_click = None;
                 self.refresh_media();
                 if self.live.is_none() {
                     self.prepare_photos();
+                    if self.photos.is_none() {
+                        self.stop_slideshow();
+                        if self.menu == Some(Menu::Slideshow) {
+                            self.menu = None;
+                        }
+                    }
                 }
                 *metadata = Instant::now();
                 self.hovered = Instant::now();
@@ -1241,23 +1380,27 @@ impl App {
                     self.finish_live(true);
                 }
                 if let Some(error) = error {
+                    if self.photo_switch.is_some_and(|(target, _)| target == id) {
+                        self.photo_switch = None;
+                        self.stop_slideshow();
+                    }
                     if self.fade.as_ref().is_some_and(|fade| fade.target == id) {
                         self.clear_crossfade();
                     }
                     self.note(format!("Couldn’t play this item: {error}"));
                 }
-                self.refresh_media();
+                // A normal end usually precedes another Start. Polling on
+                // the next frame is enough if playback actually went idle.
             }
             Event::FrameReady => {
                 if let (Some(fade), Some(id)) = (&mut self.fade, self.active_file) {
                     fade.ready(id, Instant::now());
                 }
-                self.ready_still = self.media.kind == Kind::Image
-                    && self.mpv.get("current-tracks/video/image").as_bool() == Some(true);
-            }
-            Event::SnapshotReady(request, snapshot) => {
-                if request == self.capture_request {
-                    self.still_snapshot = snapshot;
+                if let Some(slideshow) = &mut self.slideshow
+                    && self.photo_switch.is_none()
+                    && self.media.kind == Kind::Image
+                {
+                    slideshow.next = Instant::now() + SLIDE_INTERVAL;
                 }
             }
             Event::Pointer(event) => self.pointer(event),
@@ -1345,6 +1488,7 @@ impl App {
                 continue;
             }
             last_frame = Instant::now();
+            self.tick_slideshow();
             if last_metadata.elapsed() > Duration::from_millis(250) {
                 self.refresh_media();
                 last_metadata = Instant::now();
@@ -1375,7 +1519,6 @@ impl App {
             if w <= 0 || h <= 0 {
                 continue;
             }
-            self.capture_still((w, h));
             if self
                 .fade
                 .as_mut()
@@ -1413,6 +1556,10 @@ impl App {
                         .as_ref()
                         .is_some_and(|folder| folder.live_clip().is_some()),
                 live_playing: self.live.is_some(),
+                photo_zoom: self.zoom,
+                slideshow_playing: self.slideshow.is_some(),
+                slideshow_music: self.slideshow_music.as_deref(),
+                picking_music: self.picker,
                 stream: self.stream.as_ref().map(|input| ui::StreamView {
                     before: &input.text[..input.cursor],
                     after: &input.text[input.cursor..],
@@ -1430,7 +1577,7 @@ impl App {
                     && !self.timing.maximized,
                 controls_interactive: show_controls,
                 controls_opacity,
-                buffering: self.timing.buffering,
+                buffering: self.timing.buffering && self.photo_switch.is_none(),
                 volume: self.timing.volume,
                 position: self.timing.position,
                 duration: self.timing.duration,
@@ -1603,10 +1750,10 @@ fn entry() -> Result<(), String> {
         recent,
         fade: None,
         active_file: None,
-        ready_still: false,
-        still_snapshot: None,
-        capture_attempt: None,
-        capture_request: 0,
+        photo_switch: None,
+        zoom: PhotoZoom::Fit,
+        slideshow: None,
+        slideshow_music: None,
         photos: None,
         live: None,
         stream: None,

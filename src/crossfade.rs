@@ -19,7 +19,6 @@ impl Crossfade {
         target: i64,
         display: (i32, i32),
         previous: Option<Self>,
-        prepared: Option<Snapshot>,
     ) -> Option<Self> {
         let now = Instant::now();
         let outgoing = match previous {
@@ -31,7 +30,7 @@ impl Crossfade {
                 return Some(fade);
             }
             Some(fade) => {
-                let mut shot = prepared.or_else(|| mpv.snapshot())?;
+                let mut shot = mpv.snapshot()?;
                 // Capture what the viewer currently sees if they navigate
                 // midway through another blend, not just the lower layer.
                 if (shot.width, shot.height) == (fade.outgoing.width, fade.outgoing.height)
@@ -46,7 +45,7 @@ impl Crossfade {
                 }
                 shot
             }
-            None => prepared.or_else(|| mpv.snapshot())?,
+            None => mpv.snapshot()?,
         };
         mpv.crossfade_bitmap(&outgoing, &outgoing.bgra, display)
             .then_some(Self {

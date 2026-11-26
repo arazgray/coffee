@@ -34,6 +34,26 @@ pub enum Kind {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhotoZoom {
+    #[default]
+    Fit,
+    Fill,
+    Actual,
+}
+
+impl PhotoZoom {
+    pub fn options(self) -> [(&'static str, &'static str); 2] {
+        [
+            ("panscan", if self == Self::Fill { "1" } else { "0" }),
+            (
+                "video-unscaled",
+                if self == Self::Actual { "yes" } else { "no" },
+            ),
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenderMode {
     #[default]
     Auto,
@@ -72,44 +92,16 @@ impl RenderMode {
     }
 }
 
+pub const PHOTO_EXTENSIONS: &str = "jpg jpeg jfif jpe png apng webp gif avif bmp tif tiff jxl heic heif heics heifs qoi ico jp2 j2k j2c tga dds hdr exr pbm pgm ppm pam";
+
 pub fn image_path(path: &str) -> bool {
     Path::new(path)
         .extension()
         .and_then(|s| s.to_str())
         .is_some_and(|s| {
-            matches!(
-                s.to_ascii_lowercase().as_str(),
-                "png"
-                    | "apng"
-                    | "jpg"
-                    | "jpeg"
-                    | "jfif"
-                    | "jpe"
-                    | "bmp"
-                    | "webp"
-                    | "gif"
-                    | "avif"
-                    | "tiff"
-                    | "tif"
-                    | "jxl"
-                    | "heic"
-                    | "heif"
-                    | "heics"
-                    | "heifs"
-                    | "qoi"
-                    | "ico"
-                    | "jp2"
-                    | "j2k"
-                    | "j2c"
-                    | "tga"
-                    | "dds"
-                    | "hdr"
-                    | "exr"
-                    | "pbm"
-                    | "pgm"
-                    | "ppm"
-                    | "pam"
-            )
+            PHOTO_EXTENSIONS
+                .split_whitespace()
+                .any(|ext| ext.eq_ignore_ascii_case(s))
         })
 }
 

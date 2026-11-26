@@ -121,6 +121,10 @@ impl PhotoFolder {
         let index = self.index.checked_add_signed(direction as isize)?;
         self.files.get(index).map(PathBuf::as_path)
     }
+
+    pub fn next_slide(&self) -> Option<&Path> {
+        (self.files.len() > 1).then(|| self.files[(self.index + 1) % self.files.len()].as_path())
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +178,9 @@ mod tests {
         }
         assert!(folder.select(&dir.join("Shot 0.jpg")));
         assert_eq!(folder.preload_paths().len(), 12);
+        assert_eq!(folder.next_slide(), Some(dir.join("Shot 1.jpg").as_path()));
+        assert!(folder.select(&dir.join("Shot 14.jpg")));
+        assert_eq!(folder.next_slide(), Some(dir.join("Shot 0.jpg").as_path()));
     }
 }
 

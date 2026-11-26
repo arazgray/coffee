@@ -4,11 +4,30 @@ use std::{
     process::Command,
 };
 
-const MEDIA_EXTENSIONS: &str = "mp4 m4v mkv webm mov avi mpeg mpg m2ts mts ts ogv wmv asf flv vob mp3 flac wav m4a opus aac ogg oga wma aiff aif alac ac3 eac3 ape mka jpg jpeg jfif jpe png apng webp gif avif bmp tiff tif jxl heic heif heics heifs qoi ico jp2 j2k j2c tga dds hdr exr pbm pgm ppm pam";
+const VIDEO_EXTENSIONS: &str = "mp4 m4v mkv webm mov qt avi mpeg mpg m1v m2v m2t m2ts mts ts ogv wmv asf flv f4v vob 3gp 3g2 mxf dv rm rmvb nut";
+const AUDIO_EXTENSIONS: &str = "mp3 mp2 flac wav wave m4a m4b opus aac ogg oga wma aiff aif aifc alac ac3 eac3 dts ape mka adts wv tta caf au amr";
+
+fn media_extensions() -> impl Iterator<Item = &'static str> {
+    [
+        VIDEO_EXTENSIONS,
+        AUDIO_EXTENSIONS,
+        crate::state::PHOTO_EXTENSIONS,
+    ]
+    .into_iter()
+    .flat_map(str::split_whitespace)
+}
 
 #[cfg(target_os = "linux")]
 pub fn media_filter() -> String {
-    MEDIA_EXTENSIONS
+    media_extensions()
+        .map(|ext| format!("*.{ext}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(target_os = "linux")]
+pub fn audio_filter() -> String {
+    AUDIO_EXTENSIONS
         .split_whitespace()
         .map(|ext| format!("*.{ext}"))
         .collect::<Vec<_>>()
@@ -23,7 +42,7 @@ pub fn pick(picker: crate::Picker, recent: &std::path::Path) -> Option<String> {
         .set_directory(recent);
     match picker {
         Files | Add => {
-            let extensions: Vec<_> = MEDIA_EXTENSIONS.split_whitespace().collect();
+            let extensions: Vec<_> = media_extensions().collect();
             base.add_filter("Media files", &extensions)
                 .add_filter("All files", &["*"])
                 .pick_files()
@@ -35,6 +54,14 @@ pub fn pick(picker: crate::Picker, recent: &std::path::Path) -> Option<String> {
                         .join("\n")
                 })
         }
+        SlideshowMusic => base
+            .add_filter(
+                "Audio files",
+                &AUDIO_EXTENSIONS.split_whitespace().collect::<Vec<_>>(),
+            )
+            .add_filter("All files", &["*"])
+            .pick_file()
+            .map(|file| file.to_string_lossy().into_owned()),
         Subtitles => base
             .add_filter("Subtitle files", &["srt", "vtt", "ass", "ssa", "sub"])
             .pick_file()

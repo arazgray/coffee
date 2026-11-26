@@ -1,7 +1,7 @@
 use crate::{
     gpu::{DecodeChoice, DecoderGpu},
     scale::{PERCENT, pixels},
-    state::{Hdr, Kind, Media, RenderMode, display_name, is_stream, time},
+    state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, is_stream, time},
 };
 use std::fmt::Write;
 
@@ -17,6 +17,7 @@ const ACCENT: &str = "EDAA7B";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Open,
+    Slideshow,
     Context,
     Playlist,
     Audio,
@@ -54,6 +55,11 @@ pub enum Action {
     Previous,
     Next,
     LivePhoto,
+    PhotoZoom(PhotoZoom),
+    SlideshowMusic,
+    ClearSlideshowMusic,
+    StartSlideshow,
+    StopSlideshow,
     Skip(i32),
     Seek(f64),
     Volume(i32),
@@ -406,6 +412,10 @@ pub struct View<'a> {
     pub photo_position: Option<(usize, usize)>,
     pub live_available: bool,
     pub live_playing: bool,
+    pub photo_zoom: PhotoZoom,
+    pub slideshow_playing: bool,
+    pub slideshow_music: Option<&'a str>,
+    pub picking_music: bool,
     pub stream: Option<StreamView<'a>>,
     pub paused: bool,
     pub muted: bool,
@@ -432,9 +442,11 @@ pub struct View<'a> {
     pub toast: &'a str,
 }
 
+const COMPACT_PHOTO_WIDTH: i32 = 320;
+
 fn bottom_height(view: View<'_>) -> i32 {
     if view.media.kind == Kind::Image {
-        44
+        if view.w < COMPACT_PHOTO_WIDTH { 77 } else { 44 }
     } else if view.w < 670 {
         91
     } else {
@@ -574,7 +586,7 @@ pub fn draw(mut v: View<'_>) -> Frame {
         f.opacity = 255;
         f.interactive = true;
     }
-    if v.live_available || v.live_playing {
+    if (v.live_available && !v.slideshow_playing) || v.live_playing {
         f.labeled_button(
             Rect::new(w - 102, 57, 89, 32),
             if v.live_playing { "Stop" } else { "LIVE" },
@@ -582,6 +594,29 @@ pub fn draw(mut v: View<'_>) -> Frame {
             v,
             (v.live_playing, true),
             Action::LivePhoto,
+        );
+    }
+    if v.photo_position.is_some() || v.slideshow_playing {
+        let rect = slideshow_anchor(v);
+        let compact = rect.w < 106;
+        f.labeled_button(
+            rect,
+            if v.slideshow_playing {
+                if compact { "Stop" } else { "Stop slideshow" }
+            } else {
+                "Slideshow"
+            },
+            (
+                (!compact).then_some(if v.slideshow_playing { "Pause" } else { "Play" }),
+                (!compact && !v.slideshow_playing).then_some("ChevronDown"),
+            ),
+            v,
+            (v.slideshow_playing || v.menu == Some(Menu::Slideshow), true),
+            if v.slideshow_playing {
+                Action::StopSlideshow
+            } else {
+                Action::Menu(Menu::Slideshow)
+            },
         );
     }
     if v.buffering && !empty && v.menu.is_none() {
@@ -636,6 +671,18 @@ pub fn draw(mut v: View<'_>) -> Frame {
         stream_panel(&mut f, v, stream);
     }
     f
+}
+
+fn slideshow_anchor(v: View<'_>) -> Rect {
+    let beside_live = v.live_available && !v.slideshow_playing && v.w >= 234;
+    let edge = if beside_live { v.w - 110 } else { v.w - 13 };
+    let y = if v.live_available && !v.slideshow_playing && !beside_live {
+        94
+    } else {
+        57
+    };
+    let width = (edge - 10).min(137);
+    Rect::new(edge - width, y, width, 32)
 }
 
 fn stream_panel(f: &mut Frame, v: View<'_>, stream: StreamView<'_>) {
@@ -850,15 +897,19 @@ fn bottom(f: &mut Frame, v: View<'_>) {
     );
     if image {
         let status = format!("Image {} of {}", index + 1, total.max(1));
-        f.text(
-            x + 72,
-            row + 10,
-            12,
-            7,
-            MUTED,
-            false,
-            &shorten(&status, ((v.w - 207) / 7).max(5) as usize),
-        );
+        let reserve = if v.w < COMPACT_PHOTO_WIDTH { 110 } else { 239 };
+        let space = v.w - reserve - x - 72;
+        if space >= 42 {
+            f.text(
+                x + 72,
+                row + 10,
+                12,
+                7,
+                MUTED,
+                false,
+                &shorten(&status, (space / 7) as usize),
+            );
+        }
     } else {
         f.icon_button(
             Rect::new(x + 66, row, 33, 32),
@@ -963,6 +1014,45 @@ fn bottom(f: &mut Frame, v: View<'_>) {
             f.icon_button(r, icon, v, menu.is_some() && v.menu == menu, true, action);
         }
     }
+    if image {
+        let (x, y) = if v.w < COMPACT_PHOTO_WIDTH {
+            (9, row + 34)
+        } else {
+            (right - 128, row)
+        };
+        photo_zoom(f, v, x, y);
+    }
+}
+
+fn photo_zoom(f: &mut Frame, v: View<'_>, x: i32, y: i32) {
+    f.rect(Rect::new(x, y, 120, 32), 6, LINE, 0);
+    f.rect(Rect::new(x + 1, y + 1, 118, 30), 5, "211A16", 0);
+    for (offset, width, label, zoom) in [
+        (1, 36, "Fit", PhotoZoom::Fit),
+        (37, 36, "Fill", PhotoZoom::Fill),
+        (73, 46, "100%", PhotoZoom::Actual),
+    ] {
+        let part = Rect::new(x + offset, y + 1, width, 30);
+        let active = v.photo_zoom == zoom;
+        if active || part.contains(v.mouse) {
+            f.rect(part, 4, if active { "3D2A1E" } else { "31251D" }, 0);
+        }
+        if offset > 1 {
+            f.rect(Rect::new(part.x, y + 7, 1, 18), 0, LINE, 0);
+        }
+        f.text(
+            part.x + width / 2,
+            y + 16,
+            12,
+            5,
+            if active { ACCENT } else { TEXT },
+            active,
+            label,
+        );
+        if v.menu.is_none() {
+            f.hit(part, Action::PhotoZoom(zoom));
+        }
+    }
 }
 
 struct Row {
@@ -1006,6 +1096,22 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
                 row("Open a stream…", Action::OpenStream),
             ]);
             "OPEN"
+        }
+        Menu::Slideshow => {
+            rows.push(note("5 seconds per photo · loops"));
+            rows.push(note(v.slideshow_music.map_or_else(
+                || "No music selected".to_owned(),
+                |path| display_name(path),
+            )));
+            rows.push(if v.picking_music {
+                note("Choosing music…")
+            } else {
+                row("Open music…", Action::SlideshowMusic)
+            });
+            if v.slideshow_music.is_some() && !v.picking_music {
+                rows.push(row("Remove music", Action::ClearSlideshowMusic));
+            }
+            "SLIDESHOW"
         }
         Menu::Context => {
             let playback = if v.paused { "Play" } else { "Pause" };
@@ -1205,6 +1311,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
                 "L  —  Playlist",
                 "I  —  Media details",
                 "Esc  —  Close panel or exit fullscreen",
+                "Esc  —  Stop slideshow",
             ] {
                 rows.push(note(label));
             }
@@ -1213,15 +1320,22 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
     };
     let width = match menu {
         Menu::Open => (v.w - 57).min(pixels(212)),
+        Menu::Slideshow => (v.w - 20).min(pixels(247)),
         Menu::Context => (v.w - 16).min(pixels(200)),
         _ => (v.w - pixels(20)).min(pixels(390)),
     };
     let row_height = pixels(28);
-    let footer = pixels(if menu == Menu::Playlist { 42 } else { 8 });
-    let available = if menu == Menu::Context {
-        v.h - 16 - pixels(34) - footer
+    let footer = pixels(if matches!(menu, Menu::Playlist | Menu::Slideshow) {
+        42
     } else {
-        v.h - bottom_height(v) - 48 - pixels(34 + 6) - footer
+        8
+    });
+    let available = match menu {
+        Menu::Context => v.h - 16 - pixels(34) - footer,
+        Menu::Slideshow => {
+            v.h - bottom_height(v) - slideshow_anchor(v).y - 36 - pixels(34) - footer
+        }
+        _ => v.h - bottom_height(v) - 48 - pixels(34 + 6) - footer,
     };
     let max_rows = (available / row_height).clamp(1, 12) as usize;
     let max_scroll = rows.len().saturating_sub(max_rows);
@@ -1230,6 +1344,13 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
     let height = (end - scroll) as i32 * row_height + pixels(34) + footer;
     let (x, y) = match menu {
         Menu::Open => (47, 48),
+        Menu::Slideshow => {
+            let anchor = slideshow_anchor(v);
+            (
+                (anchor.x + anchor.w - width).clamp(9, v.w - width - 9),
+                (anchor.y + anchor.h + 5).min((v.h - bottom_height(v) - height - 5).max(48)),
+            )
+        }
         Menu::Context => {
             let (x, y) = v.context_anchor.unwrap_or(v.mouse);
             (
@@ -1347,7 +1468,21 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
             );
         }
     }
-    if menu == Menu::Playlist {
+    if menu == Menu::Slideshow {
+        f.labeled_button(
+            Rect::new(
+                x + width - pixels(91),
+                y + height - pixels(36),
+                pixels(80),
+                pixels(29),
+            ),
+            "Play",
+            (Some("Play"), None),
+            v,
+            (!v.picking_music, !v.picking_music),
+            Action::StartSlideshow,
+        );
+    } else if menu == Menu::Playlist {
         let wide = (width - pixels(22)) / 4;
         for (i, label, action, enabled) in [
             (0, "Add files", Action::AddFiles, true),
@@ -1375,6 +1510,48 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn photos_have_a_segmented_zoom_control_and_a_slideshow_dropdown() {
+        let media = Media {
+            kind: Kind::Image,
+            ..Default::default()
+        };
+        let mut v = video(&media);
+        v.photo_position = Some((0, 3));
+        v.live_available = true;
+        for width in [1100, 320] {
+            v.w = width;
+            let frame = draw(v);
+            let (w, h) = frame.resolution();
+            let compact = w < COMPACT_PHOTO_WIDTH;
+            let x = if compact { 9 } else { w - 237 };
+            let y = h - if compact { 23 } else { 24 };
+            for (offset, zoom) in [
+                (19, PhotoZoom::Fit),
+                (55, PhotoZoom::Fill),
+                (96, PhotoZoom::Actual),
+            ] {
+                assert_eq!(
+                    frame.at(frame.layout.physical_point((x + offset, y))),
+                    Action::PhotoZoom(zoom)
+                );
+            }
+            let anchor = slideshow_anchor(View { w, h, ..v });
+            assert_eq!(
+                frame.at(frame.layout.physical_point((anchor.x + 25, anchor.y + 12))),
+                Action::Menu(Menu::Slideshow)
+            );
+        }
+        v.w = 1100;
+        v.menu = Some(Menu::Slideshow);
+        let frame = draw(v);
+        assert!(frame.hits.iter().any(|(_, a)| *a == Action::SlideshowMusic));
+        assert!(frame.hits.iter().any(|(_, a)| *a == Action::StartSlideshow));
+        v.picking_music = true;
+        let frame = draw(v);
+        assert!(!frame.hits.iter().any(|(_, a)| *a == Action::StartSlideshow));
+    }
+
     fn video(media: &Media) -> View<'_> {
         View {
             w: 1100,
@@ -1384,6 +1561,10 @@ mod tests {
             photo_position: None,
             live_available: false,
             live_playing: false,
+            photo_zoom: PhotoZoom::Fit,
+            slideshow_playing: false,
+            slideshow_music: None,
+            picking_music: false,
             stream: None,
             paused: false,
             muted: false,

@@ -16,14 +16,58 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 ## Playback
 
 - Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
-- Open a photo to browse nearby images with **Previous** and **Next**. Coffee preloads five photos on each side and their Live clips in the background, prioritizing the current Live clip. The RAM cache is bounded at 256 MiB (128 MiB per file); uncached files still open normally.
-- A same-named `.MOV` companion adds a **Live** badge. Click it to play the clip and automatically return to the still without adding a playlist item. Photo changes and Live previews blend directly into the next frame over 150 ms, without fading to black.
+- Open a photo to browse nearby images with **Previous** and **Next**. Photos switch without a fade or hiding the controls. Coffee preloads five photos on each side and their Live clips in the background, prioritizing the current Live clip. The RAM cache is bounded at 256 MiB (128 MiB per file); uncached files still open normally.
+- A same-named `.MOV` companion adds a **Live** badge. Click it to play the clip and automatically return to the still without adding a playlist item. Live Photo transitions blend directly into the next frame over 150 ms.
+- **Slideshow**, beside **Live** in the playback area, opens a dropdown with optional music and a **Play** button. Play enters fullscreen and advances every five seconds, looping through the folder. Press **Esc** to stop the slideshow and its music.
+- The photo bar has **Fit** (show the entire image), **Fill** (crop to fill the window), and **100%** (one image pixel per display pixel). The selected zoom carries over to the next photo.
 - **Open Streams** uses the player's own dark URL dialog. It accepts HLS, DASH, and direct HTTP(S) URLs. Paste with **Ctrl+V** (or **Command+V** where supported).
-- The default filters include common video, audio, and image formats. Supported images include JPEG, PNG/APNG, HEIC/HEIF, AVIF, JPEG XL, QOI, WebP (lossy, lossless, and animated), TIFF, GIF, BMP, and JPEG 2000. Animated WebP from a local file works on older FFmpeg builds too. Experimental WebP v2 is not supported.
-- Full-resolution tiled HEIC/HEIF (common on iPhones) uses libheif with an HEVC decoder plugin when installed. The Debian package recommends `libheif-plugin-libde265`; Fedora users may need `libheif-freeworld` from RPM Fusion. Codec availability otherwise depends on the libmpv/FFmpeg build.
 - The playlist supports `.coffee.json` and older `.kahve.json` files, plus `.m3u`/`.m3u8` import. Playlists refer to local paths and URLs; they don't copy media.
-- Double-click the video to toggle fullscreen. Double-click open space on either control bar to maximize or restore. Right-click for playback actions and the current item's containing folder or playlist entry.
+- Double-click a photo or video to toggle fullscreen. Double-click open space on either control bar to maximize or restore. Right-click for playback actions and the current item's containing folder or playlist entry.
 - The player and stream dialog are always dark. On KDE Plasma 6, Coffee adds a dark window-frame rule scoped to `coffee`. Other Linux compositors may control their own decorations. Coffee requests a dark frame on Windows and macOS.
+
+## Supported media
+
+Coffee uses the demuxers and decoders in its installed libmpv/FFmpeg build. The lists below cover Coffee’s media filters and commonly supported codecs. Use **All files** for other extensions. Container support does not guarantee support for every codec or profile inside it; hardware decoding also depends on the GPU and driver. See FFmpeg’s [full format and codec reference](https://ffmpeg.org/general.html#Supported-File-Formats_002c-Codecs-or-Features) for the broader list.
+
+### Video
+
+| Format / container | Extensions |
+| --- | --- |
+| MPEG-4 / QuickTime | `.mp4`, `.m4v`, `.mov`, `.qt`, `.3gp`, `.3g2` |
+| Matroska / WebM / Ogg | `.mkv`, `.webm`, `.ogv` |
+| Audio Video Interleave | `.avi` |
+| MPEG video and program streams / DVD | `.mpeg`, `.mpg`, `.m1v`, `.m2v`, `.vob` |
+| MPEG transport streams / AVCHD | `.ts`, `.m2t`, `.m2ts`, `.mts` |
+| Windows Media / ASF and Flash Video | `.wmv`, `.asf`, `.flv`, `.f4v` |
+| Broadcast and legacy formats | `.mxf`, `.dv`, `.rm`, `.rmvb`, `.nut` |
+
+**Video codecs:** H.264/AVC, H.265/HEVC, AV1, VP9, VP8, VP6, MPEG-1 Video, MPEG-2 Video, MPEG-4 Part 2 (including DivX/Xvid), H.261, H.263, Theora, VC-1, WMV7/8/9, Sorenson, RealVideo, Motion JPEG, DV, Apple ProRes, DNxHD/DNxHR, FFV1, CineForm, HuffYUV, UT Video, Hap, and raw/uncompressed video. Newer or optional decoders such as H.266/VVC depend on the bundled FFmpeg version and build options.
+
+**Streams:** HLS (`.m3u8`), MPEG-DASH (`.mpd`), and direct HTTP(S) media URLs.
+
+### Photos
+
+- **JPEG** `.jpg`, `.jpeg`, `.jfif`, `.jpe`; **PNG/APNG** `.png`, `.apng`; **GIF** `.gif`; **WebP** `.webp` (lossy, lossless, transparency, and animation).
+- **AVIF** `.avif`; **HEIC/HEIF** `.heic`, `.heif`, `.heics`, `.heifs`; **JPEG XL** `.jxl`; **JPEG 2000** `.jp2`, `.j2k`, `.j2c`; **QOI** `.qoi`.
+- **TIFF** `.tif`, `.tiff`; **BMP** `.bmp`; **ICO** `.ico`; **Targa** `.tga`; **DDS** `.dds`; **Radiance HDR** `.hdr`; **OpenEXR** `.exr`; **Netpbm** `.pbm`, `.pgm`, `.ppm`, `.pam`.
+
+Full-resolution tiled HEIC/HEIF (common on iPhones) uses libheif with an HEVC decoder. The Debian package recommends `libheif-plugin-libde265`; Fedora users may need `libheif-freeworld` from RPM Fusion. Local animated WebP works on older FFmpeg builds too. Experimental WebP v2 is not supported.
+
+### Music
+
+| Format / codec | Extensions |
+| --- | --- |
+| MPEG audio layers II and III | `.mp2`, `.mp3` |
+| AAC (including AAC-LC / HE-AAC) | `.aac`, `.adts`, `.m4a`, `.m4b` |
+| Apple Lossless | `.alac`, `.m4a`, `.m4b`, `.caf` |
+| Lossless audio (FLAC, Monkey’s Audio, WavPack, True Audio) | `.flac`, `.ape`, `.wv`, `.tta` |
+| PCM and other audio in WAV, AIFF, CAF and AU | `.wav`, `.wave`, `.aif`, `.aiff`, `.aifc`, `.caf`, `.au` |
+| Vorbis and Opus | `.ogg`, `.oga`, `.opus` (also `.webm`, `.mka`) |
+| Windows Media Audio | `.wma`, `.asf` |
+| Dolby Digital / Digital Plus, DTS, and AMR | `.ac3`, `.eac3`, `.dts`, `.amr` |
+| Matroska Audio | `.mka` |
+
+Many of the same audio codecs also play as tracks inside video containers, including AAC, AC-3, E-AC-3, DTS, TrueHD, FLAC, Opus, Vorbis, and PCM. Audio passthrough and multi-channel output depend on the audio hardware and system configuration.
 
 ## HDR and hardware decoding
 
