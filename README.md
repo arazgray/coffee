@@ -1,6 +1,6 @@
 # Coffee
 
-Coffee is a native Rust player for video, music, and photos, using libmpv and FFmpeg. Its interface is dark and does not need a browser.
+Coffee is a native Rust player for video, music, and photos, using libmpv and FFmpeg.
 
 ## Install
 
