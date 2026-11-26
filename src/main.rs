@@ -16,7 +16,7 @@ mod ui;
 use crossfade::Crossfade;
 use engine::{Engine, Event, PointerEvent};
 use gpu::{DecodeChoice, Devices};
-use photos::PhotoFolder;
+use photos::{PanBounds, PhotoFolder};
 use state::{Hdr, Kind, Media, PhotoZoom, RenderMode, display_name, image_path, is_stream};
 #[cfg(target_os = "linux")]
 use std::process::Command;
@@ -146,6 +146,7 @@ fn runtime(_files: &[String], _tx: Sender<Input>) -> Result<Option<Runtime>, Str
 struct Timings {
     paused: bool,
     muted: bool,
+    repeat_one: bool,
     fullscreen: bool,
     maximized: bool,
     border: bool,
@@ -156,6 +157,7 @@ struct Timings {
     volume: f64,
     speed: f64,
     dimensions: (i32, i32),
+    pan_bounds: PanBounds,
     mouse: Option<(i32, i32)>,
 }
 
@@ -170,9 +172,14 @@ fn mouse_position(mpv: &Engine) -> Option<(i32, i32)> {
 impl Timings {
     fn read(mpv: &Engine) -> Self {
         let dimensions = mpv.get("osd-dimensions");
+        let size = (
+            dimensions["w"].as_i64().unwrap_or_default() as i32,
+            dimensions["h"].as_i64().unwrap_or_default() as i32,
+        );
         Self {
             paused: mpv.get("pause").as_bool().unwrap_or(true),
             muted: mpv.get("mute").as_bool().unwrap_or(false),
+            repeat_one: mpv.get("loop-file").as_str() == Some("inf"),
             fullscreen: mpv.get("fullscreen").as_bool().unwrap_or(false),
             maximized: mpv.get("window-maximized").as_bool().unwrap_or(false),
             border: mpv.get("border").as_bool().unwrap_or(false),
@@ -185,9 +192,10 @@ impl Timings {
                 .unwrap_or_default(),
             volume: mpv.get("volume").as_f64().unwrap_or(100.0),
             speed: mpv.get("speed").as_f64().unwrap_or(1.0),
-            dimensions: (
-                dimensions["w"].as_i64().unwrap_or_default() as i32,
-                dimensions["h"].as_i64().unwrap_or_default() as i32,
+            dimensions: size,
+            pan_bounds: PanBounds::from_margins(
+                size,
+                ["ml", "mr", "mt", "mb"].map(|k| dimensions[k].as_i64().unwrap_or_default()),
             ),
             mouse: mouse_position(mpv),
         }
@@ -200,10 +208,20 @@ struct LivePreview {
 }
 
 const SLIDE_INTERVAL: Duration = Duration::from_secs(5);
+const SLIDE_CONTROLS_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct Slideshow {
     next: Instant,
     music: Option<Engine>,
+    reveal_after: Instant,
+    controls_until: Option<Instant>,
+}
+
+struct PhotoDrag {
+    origin: (i32, i32),
+    position: [f64; 2],
+    bounds: PanBounds,
+    moved: bool,
 }
 
 struct StreamInput {
@@ -347,6 +365,11 @@ impl ControlsFade {
     fn active(&self, now: Instant) -> bool {
         self.from != self.target() && now.duration_since(self.started) < CONTROLS_FADE
     }
+    fn hide_now(&mut self, now: Instant) {
+        self.from = 0.0;
+        self.visible = false;
+        self.started = now;
+    }
     fn target(&self) -> f64 {
         if self.visible { 1.0 } else { 0.0 }
     }
@@ -386,6 +409,8 @@ struct App {
     controls: ControlsFade,
     pressed: Option<Action>,
     drag_origin: Option<(i32, i32)>,
+    photo_drag: Option<PhotoDrag>,
+    photo_pan: [f64; 2],
     pending_click: Option<PendingClick>,
     last_volume: f64,
     picker: bool,
@@ -712,9 +737,14 @@ impl App {
                 Err(error) => self.note(format!("Couldn’t start slideshow music: {error}")),
             }
         }
+        let now = Instant::now();
+        self.controls.hide_now(now);
         self.slideshow = Some(Slideshow {
-            next: Instant::now() + SLIDE_INTERVAL,
+            next: now + SLIDE_INTERVAL,
             music,
+            // Fullscreen can move the reported pointer without user input.
+            reveal_after: now + Duration::from_millis(400),
+            controls_until: None,
         });
         Ok(())
     }
@@ -761,7 +791,11 @@ impl App {
                 return;
             }
         }
-        if self.photo_switch.is_some() || self.live.is_some() || Instant::now() < slideshow.next {
+        if self.photo_switch.is_some()
+            || self.photo_drag.is_some()
+            || self.live.is_some()
+            || Instant::now() < slideshow.next
+        {
             return;
         }
         slideshow.next = Instant::now() + SLIDE_INTERVAL;
@@ -788,14 +822,14 @@ impl App {
         let queue = QueueSnapshot::read(&self.mpv);
         let photo_id = queue.current.ok_or("No active photo")?;
         let index = queue.ids.len();
-        // Retain the clip's final frame for the return blend, even if items
-        // have been added after the preview in the meantime.
+        // Retain the clip's final frame for the return blend. A Live Photo
+        // preview plays once even when Repeat One is enabled in the player.
         self.mpv.command(&[
             "loadfile",
             &clip.to_string_lossy(),
             "append",
             "-1",
-            "keep-open=always",
+            "keep-open=always,loop-file=no",
         ])?;
         self.queue_snapshot = QueueSnapshot::read(&self.mpv);
         let clip_id = *self
@@ -843,13 +877,19 @@ impl App {
         if !photo {
             self.stop_slideshow();
         }
-        self.clear_crossfade();
-        self.mpv
-            .command(&["playlist-play-index", &index.to_string()])?;
-        self.photo_switch = pending;
-        if self.timing.paused {
-            self.mpv.set("pause", "no")?;
+        if self.slideshow.is_some()
+            && let Some((id, _)) = pending
+        {
+            self.crossfade_to(index, id)?;
+        } else {
+            self.clear_crossfade();
+            self.mpv
+                .command(&["playlist-play-index", &index.to_string()])?;
+            if self.timing.paused {
+                self.mpv.set("pause", "no")?;
+            }
         }
+        self.photo_switch = pending;
         Ok(())
     }
 
@@ -1074,6 +1114,10 @@ impl App {
             }
             Action::LivePhoto => self.live_photo(),
             Action::PhotoZoom(zoom) => {
+                if self.zoom != zoom {
+                    self.photo_drag = None;
+                    self.set_photo_pan([0.0; 2]);
+                }
                 self.zoom = zoom;
                 self.mpv.photo_zoom(zoom, self.media.kind == Kind::Image)
             }
@@ -1108,6 +1152,14 @@ impl App {
             Action::Seek(part) => {
                 self.mpv
                     .command(&["seek", &(part * 100.0).to_string(), "absolute-percent"])
+            }
+            Action::RepeatOne => {
+                if matches!(self.media.kind, Kind::Video | Kind::Music) && self.live.is_none() {
+                    self.mpv
+                        .command(&["cycle-values", "loop-file", "no", "inf"])
+                } else {
+                    Ok(())
+                }
             }
             Action::Mute => {
                 let audio = self.audio_controls();
@@ -1285,6 +1337,39 @@ impl App {
         }
     }
 
+    fn set_photo_pan(&mut self, position: [f64; 2]) {
+        for (i, key) in ["video-pan-x", "video-pan-y"].into_iter().enumerate() {
+            if position[i] != self.photo_pan[i]
+                && self
+                    .mpv
+                    .set(
+                        &format!("file-local-options/{key}"),
+                        &position[i].to_string(),
+                    )
+                    .is_ok()
+            {
+                self.photo_pan[i] = position[i];
+            }
+        }
+    }
+
+    fn drag_photo_to(&mut self, mouse: Option<(i32, i32)>) {
+        let (Some(drag), Some(point)) = (&mut self.photo_drag, mouse) else {
+            return;
+        };
+        let delta = [
+            f64::from(point.0) - f64::from(drag.origin.0),
+            f64::from(point.1) - f64::from(drag.origin.1),
+        ];
+        if !drag.moved && delta[0].abs().max(delta[1].abs()) < 5.0 {
+            return;
+        }
+        drag.moved = true;
+        self.pending_click = None;
+        let position = drag.bounds.drag(drag.position, delta);
+        self.set_photo_pan(position);
+    }
+
     fn pointer(&mut self, event: PointerEvent) {
         self.hovered = Instant::now();
         let mouse = mouse_position(&self.mpv);
@@ -1294,24 +1379,50 @@ impl App {
                 .map_or(Action::ClickStage, |f| f.at(point))
         });
         match event {
-            PointerEvent::Down => match target {
-                Some(action @ Action::SetVolume(_)) => {
-                    self.pending_click = None;
-                    self.pressed = Some(action.clone());
-                    self.action(action);
+            PointerEvent::Down => {
+                self.photo_drag = None;
+                match target {
+                    Some(action @ Action::SetVolume(_)) => {
+                        self.pending_click = None;
+                        self.pressed = Some(action.clone());
+                        self.action(action);
+                    }
+                    Some(Action::ClickStage)
+                        if self.media.kind == Kind::Image
+                            && self.photo_switch.is_none()
+                            && self.menu.is_none()
+                            && self.stream.is_none() =>
+                    {
+                        self.drag_origin = None;
+                        self.photo_drag = mouse.map(|origin| PhotoDrag {
+                            origin,
+                            bounds: self.timing.pan_bounds,
+                            position: self.photo_pan,
+                            moved: false,
+                        });
+                        self.pressed = Some(Action::ClickStage);
+                    }
+                    _ => {
+                        self.drag_origin =
+                            if target == Some(Action::DragWindow) && !self.timing.fullscreen {
+                                mouse
+                            } else {
+                                None
+                            };
+                        self.pressed = target;
+                    }
                 }
-                _ => {
-                    self.drag_origin =
-                        if target == Some(Action::DragWindow) && !self.timing.fullscreen {
-                            mouse
-                        } else {
-                            None
-                        };
-                    self.pressed = target;
-                }
-            },
+            }
             PointerEvent::Up => {
                 self.drag_origin = None;
+                self.drag_photo_to(mouse);
+                if self.photo_drag.take().is_some_and(|drag| drag.moved) {
+                    self.pressed = None;
+                    if let Some(slideshow) = &mut self.slideshow {
+                        slideshow.next = Instant::now() + SLIDE_INTERVAL;
+                    }
+                    return;
+                }
                 if self.dragging_volume() {
                     self.drag_volume_to(mouse);
                     self.pressed = None;
@@ -1330,6 +1441,7 @@ impl App {
             PointerEvent::Cancel => {
                 self.pressed = None;
                 self.drag_origin = None;
+                self.photo_drag = None;
             }
         }
     }
@@ -1339,6 +1451,8 @@ impl App {
             Event::Shutdown => return false,
             Event::Start(id) => {
                 self.active_file = Some(id);
+                self.photo_drag = None;
+                self.photo_pan = [0.0; 2];
                 if self.fade.as_ref().is_some_and(|fade| fade.target != id)
                     && QueueSnapshot::read(&self.mpv).current == Some(id)
                 {
@@ -1462,6 +1576,7 @@ impl App {
             let interval = if self.fade.is_some()
                 || self.controls.active(Instant::now())
                 || self.dragging_volume()
+                || self.photo_drag.is_some()
             {
                 Duration::from_millis(16)
             } else {
@@ -1508,13 +1623,28 @@ impl App {
             if timing.volume > 0.0 {
                 self.last_volume = timing.volume;
             }
-            if timing.mouse.is_some() && timing.mouse != self.timing.mouse {
-                self.hovered = Instant::now();
-            }
-            self.drag_volume_to(timing.mouse);
-            self.maybe_drag_window(timing.mouse);
             let (w, h) = timing.dimensions;
             let resize = timing.dimensions != self.timing.dimensions;
+            if timing.mouse.is_some() && timing.mouse != self.timing.mouse {
+                let now = Instant::now();
+                self.hovered = now;
+                if let Some(slideshow) = &mut self.slideshow
+                    && !resize
+                    && now >= slideshow.reveal_after
+                {
+                    slideshow.controls_until = Some(now + SLIDE_CONTROLS_TIMEOUT);
+                }
+            }
+            self.drag_volume_to(timing.mouse);
+            if resize {
+                self.photo_drag = None;
+                if self.media.kind == Kind::Image && self.photo_switch.is_none() {
+                    self.set_photo_pan(timing.pan_bounds.clamp(self.photo_pan));
+                }
+            } else {
+                self.drag_photo_to(timing.mouse);
+            }
+            self.maybe_drag_window(timing.mouse);
             self.timing = timing;
             if w <= 0 || h <= 0 {
                 continue;
@@ -1533,12 +1663,18 @@ impl App {
                 platform::dark_windows_frame(hwnd);
                 dark_hwnd = Some(hwnd);
             }
+            let now = Instant::now();
             let show_controls = self.menu.is_some()
                 || self.stream.is_some()
-                || self.media.kind != Kind::Video
-                || self.timing.paused
-                || self.dragging_volume()
-                || self.hovered.elapsed() < Duration::from_secs(3);
+                || if let Some(slideshow) = &self.slideshow {
+                    self.photo_drag.is_some()
+                        || slideshow.controls_until.is_some_and(|until| now < until)
+                } else {
+                    self.media.kind != Kind::Video
+                        || self.timing.paused
+                        || self.dragging_volume()
+                        || self.hovered.elapsed() < Duration::from_secs(3)
+                };
             let controls_opacity = self.controls.update(show_controls, Instant::now());
             let frame = ui::draw(View {
                 w,
@@ -1568,6 +1704,7 @@ impl App {
                 }),
                 paused: self.timing.paused,
                 muted: self.timing.muted,
+                repeat_one: self.timing.repeat_one,
                 fullscreen: self.timing.fullscreen,
                 native_titlebar: (wayland || cfg!(any(windows, target_os = "macos")))
                     && self.timing.border,
@@ -1577,7 +1714,9 @@ impl App {
                     && !self.timing.maximized,
                 controls_interactive: show_controls,
                 controls_opacity,
-                buffering: self.timing.buffering && self.photo_switch.is_none(),
+                buffering: self.timing.buffering
+                    && self.photo_switch.is_none()
+                    && self.slideshow.is_none(),
                 volume: self.timing.volume,
                 position: self.timing.position,
                 duration: self.timing.duration,
@@ -1744,6 +1883,8 @@ fn entry() -> Result<(), String> {
         controls: ControlsFade::new(Instant::now()),
         pressed: None,
         drag_origin: None,
+        photo_drag: None,
+        photo_pan: [0.0; 2],
         pending_click: None,
         last_volume: 100.0,
         picker: false,

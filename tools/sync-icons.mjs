@@ -5,7 +5,7 @@ import * as lucide from 'lucide';
 const chrome = [
   'Captions', 'Check', 'ChevronDown', 'Expand', 'FolderOpen',
   'Headphones', 'Info', 'Keyboard', 'Link2', 'ListVideo', 'Minimize', 'Music2',
-  'Pause', 'Play', 'RotateCcw', 'RotateCw', 'Settings2',
+  'Pause', 'Play', 'Repeat1', 'RotateCcw', 'RotateCw', 'Settings2',
   'SkipBack', 'SkipForward', 'Tv', 'Volume2', 'VolumeX', 'X',
   'ChevronUp', 'Minus', 'Square', 'SquarePlay',
 ];

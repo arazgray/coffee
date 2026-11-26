@@ -6,6 +6,36 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Copy, Default)]
+pub struct PanBounds {
+    image: [f64; 2],
+    limit: [f64; 2],
+}
+
+impl PanBounds {
+    pub fn from_margins(size: (i32, i32), margins: [i64; 4]) -> Self {
+        let view = [f64::from(size.0.max(0)), f64::from(size.1.max(0))];
+        // mpv reports negative margins when the full rendered frame extends
+        // beyond the viewport. This includes rotation and the selected zoom.
+        let image = [
+            (view[0] - margins[0] as f64 - margins[1] as f64).max(1.0),
+            (view[1] - margins[2] as f64 - margins[3] as f64).max(1.0),
+        ];
+        let limit = std::array::from_fn(|i| (image[i] - view[i]).max(0.0) / (2.0 * image[i]));
+        Self { image, limit }
+    }
+
+    pub fn clamp(self, position: [f64; 2]) -> [f64; 2] {
+        std::array::from_fn(|i| position[i].clamp(-self.limit[i], self.limit[i]))
+    }
+
+    pub fn drag(self, position: [f64; 2], delta: [f64; 2]) -> [f64; 2] {
+        self.clamp(std::array::from_fn(|i| {
+            position[i] + delta[i] / self.image[i].max(1.0)
+        }))
+    }
+}
+
 pub struct PhotoFolder {
     files: Vec<PathBuf>,
     pub index: usize,
@@ -130,6 +160,17 @@ impl PhotoFolder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panning_tracks_the_drag_and_stops_at_each_crop_edge() {
+        let fill = PanBounds::from_margins((800, 600), [-200, -200, 0, 0]);
+        assert_eq!(fill.drag([0.0; 2], [120.0, 500.0]), [0.1, 0.0]);
+        assert_eq!(fill.drag([0.0; 2], [-900.0, 500.0]), [-1.0 / 6.0, 0.0]);
+        let actual = PanBounds::from_margins((800, 600), [-200, -200, -100, -100]);
+        assert_eq!(actual.drag([0.0; 2], [400.0, 400.0]), [1.0 / 6.0, 0.125]);
+        let fit = PanBounds::from_margins((800, 600), [0, 0, 100, 100]);
+        assert_eq!(fit.drag([0.0; 2], [400.0, 400.0]), [0.0; 2]);
+    }
 
     #[test]
     fn scans_image_siblings_and_matches_only_same_stem_movs() {

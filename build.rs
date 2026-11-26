@@ -3,7 +3,6 @@ use tiny_skia_path as sk;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/lucide.json");
-    println!("cargo:rerun-if-changed=assets/Kahve-osd.svg");
     let icons: BTreeMap<String, String> =
         serde_json::from_str(include_str!("assets/lucide.json")).expect("Lucide artwork");
     let opts = usvg::Options::default();
@@ -22,13 +21,6 @@ fn main() {
         }
     }
     output.push_str("        _ => unreachable!(\"unknown icon {name} at {size}px\"),\n    }\n}\n");
-    let logo =
-        usvg::Tree::from_str(include_str!("assets/Kahve-osd.svg"), &opts).expect("valid logo");
-    for (name, w, h) in [("SMALL_LOGO", 27, 25), ("LARGE_LOGO", 86, 65)] {
-        let paths = drawings(&logo, w, h, false);
-        assert!(!paths.is_empty(), "empty logo");
-        writeln!(output, "const {name}: &[(&str, &str)] = &{paths:?};").unwrap();
-    }
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     fs::write(out.join("osd_paths.rs"), output).unwrap();
 }

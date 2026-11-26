@@ -13,6 +13,8 @@ const LINE: &str = "44352C";
 const TEXT: &str = "F6EEE7";
 const MUTED: &str = "BDB0A6";
 const ACCENT: &str = "EDAA7B";
+const OPEN_LEFT: i32 = 10;
+const OPEN_WIDTH: i32 = 85;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
@@ -62,6 +64,7 @@ pub enum Action {
     StopSlideshow,
     Skip(i32),
     Seek(f64),
+    RepeatOne,
     Volume(i32),
     SetVolume(u8),
     Mute,
@@ -366,19 +369,6 @@ impl Frame {
         let (origin, zoom) = self.layout.pixel_aligned_icon((x, y), size);
         self.drawing(origin, 6, zoom, icon_path(name, size), color, 0);
     }
-
-    fn logo(&mut self, (x, y): (i32, i32), paths: &[(&str, &str)]) {
-        for (color, path) in paths {
-            self.drawing(
-                (f64::from(x), f64::from(y)),
-                6,
-                (100., 100.),
-                path,
-                color,
-                0,
-            );
-        }
-    }
 }
 
 fn bgr(hex: &str) -> String {
@@ -419,6 +409,7 @@ pub struct View<'a> {
     pub stream: Option<StreamView<'a>>,
     pub paused: bool,
     pub muted: bool,
+    pub repeat_one: bool,
     pub fullscreen: bool,
     pub native_titlebar: bool,
     pub resize_grips: bool,
@@ -468,8 +459,7 @@ pub fn draw(mut v: View<'_>) -> Frame {
     let empty = v.media.kind == Kind::Empty;
     if empty {
         f.rect(Rect::new(0, 0, w, h), 0, "0C0B0A", 0);
-        let center = h / 2;
-        f.logo((w / 2 - pixels(39), center - pixels(91)), LARGE_LOGO);
+        let center = h / 2 - pixels(24);
         f.text(
             w / 2,
             center - pixels(21),
@@ -583,41 +573,14 @@ pub fn draw(mut v: View<'_>) -> Frame {
         if v.resize_grips {
             resize_grips(&mut f, w, h);
         }
+        if v.slideshow_playing {
+            photo_actions(&mut f, v);
+        }
         f.opacity = 255;
         f.interactive = true;
     }
-    if (v.live_available && !v.slideshow_playing) || v.live_playing {
-        f.labeled_button(
-            Rect::new(w - 102, 57, 89, 32),
-            if v.live_playing { "Stop" } else { "LIVE" },
-            (Some("LivePhoto"), None),
-            v,
-            (v.live_playing, true),
-            Action::LivePhoto,
-        );
-    }
-    if v.photo_position.is_some() || v.slideshow_playing {
-        let rect = slideshow_anchor(v);
-        let compact = rect.w < 106;
-        f.labeled_button(
-            rect,
-            if v.slideshow_playing {
-                if compact { "Stop" } else { "Stop slideshow" }
-            } else {
-                "Slideshow"
-            },
-            (
-                (!compact).then_some(if v.slideshow_playing { "Pause" } else { "Play" }),
-                (!compact && !v.slideshow_playing).then_some("ChevronDown"),
-            ),
-            v,
-            (v.slideshow_playing || v.menu == Some(Menu::Slideshow), true),
-            if v.slideshow_playing {
-                Action::StopSlideshow
-            } else {
-                Action::Menu(Menu::Slideshow)
-            },
-        );
+    if !v.slideshow_playing {
+        photo_actions(&mut f, v);
     }
     if v.buffering && !empty && v.menu.is_none() {
         let status = if is_stream(&v.media.path) {
@@ -671,6 +634,42 @@ pub fn draw(mut v: View<'_>) -> Frame {
         stream_panel(&mut f, v, stream);
     }
     f
+}
+
+fn photo_actions(f: &mut Frame, v: View<'_>) {
+    if (v.live_available && !v.slideshow_playing) || v.live_playing {
+        f.labeled_button(
+            Rect::new(v.w - 102, 57, 89, 32),
+            if v.live_playing { "Stop" } else { "LIVE" },
+            (Some("LivePhoto"), None),
+            v,
+            (v.live_playing, true),
+            Action::LivePhoto,
+        );
+    }
+    if v.photo_position.is_some() || v.slideshow_playing {
+        let rect = slideshow_anchor(v);
+        let compact = rect.w < 106;
+        f.labeled_button(
+            rect,
+            if v.slideshow_playing {
+                if compact { "Stop" } else { "Stop slideshow" }
+            } else {
+                "Slideshow"
+            },
+            (
+                (!compact).then_some(if v.slideshow_playing { "Pause" } else { "Play" }),
+                (!compact && !v.slideshow_playing).then_some("ChevronDown"),
+            ),
+            v,
+            (v.slideshow_playing || v.menu == Some(Menu::Slideshow), true),
+            if v.slideshow_playing {
+                Action::StopSlideshow
+            } else {
+                Action::Menu(Menu::Slideshow)
+            },
+        );
+    }
 }
 
 fn slideshow_anchor(v: View<'_>) -> Rect {
@@ -772,9 +771,8 @@ fn top(f: &mut Frame, v: View<'_>) {
     f.rect(Rect::new(0, 0, v.w, 44), 0, BAR, 9);
     f.rect(Rect::new(0, 43, v.w, 1), 0, LINE, 0);
     f.hit(Rect::new(0, 0, v.w, 44), Action::DragWindow);
-    f.logo((10, 9), SMALL_LOGO);
     f.labeled_button(
-        Rect::new(47, 7, 85, 30),
+        Rect::new(OPEN_LEFT, 7, OPEN_WIDTH, 30),
         "Open",
         (Some("FolderOpen"), Some("ChevronDown")),
         v,
@@ -791,7 +789,12 @@ fn top(f: &mut Frame, v: View<'_>) {
             Kind::Video if is_stream(&v.media.path) => "STREAM",
             _ => "FILE",
         };
-        let badge = Rect::new(144, 12, tag.chars().count() as i32 * 7 + 10, 20);
+        let badge = Rect::new(
+            OPEN_LEFT + OPEN_WIDTH + 12,
+            12,
+            tag.chars().count() as i32 * 7 + 10,
+            20,
+        );
         f.rect(badge, 4, "2C241E", 0);
         f.text(badge.x + badge.w / 2, badge.y + 10, 9, 5, MUTED, true, tag);
         let x = badge.x + badge.w + 10;
@@ -806,7 +809,7 @@ fn top(f: &mut Frame, v: View<'_>) {
         );
     }
     for (offset, icon, menu) in [(67, "Info", Menu::About), (34, "Keyboard", Menu::Shortcuts)] {
-        if v.w - right - offset < 138 {
+        if v.w - right - offset < OPEN_LEFT + OPEN_WIDTH + 6 {
             continue;
         }
         f.icon_button(
@@ -911,24 +914,38 @@ fn bottom(f: &mut Frame, v: View<'_>) {
             );
         }
     } else {
+        let repeat_left = if v.w >= 290 {
+            f.icon_button(
+                Rect::new(x + 66, row, 33, 32),
+                "RotateCcw",
+                v,
+                false,
+                !none,
+                Action::Skip(-10),
+            );
+            f.icon_button(
+                Rect::new(x + 100, row, 33, 32),
+                "RotateCw",
+                v,
+                false,
+                !none,
+                Action::Skip(10),
+            );
+            x + 134
+        } else {
+            x + 66
+        };
         f.icon_button(
-            Rect::new(x + 66, row, 33, 32),
-            "RotateCcw",
+            Rect::new(repeat_left, row, 34, 32),
+            "Repeat1",
             v,
-            false,
-            !none,
-            Action::Skip(-10),
+            v.repeat_one,
+            !none && !v.live_playing,
+            Action::RepeatOne,
         );
+        let volume_left = repeat_left + 35;
         f.icon_button(
-            Rect::new(x + 100, row, 33, 32),
-            "RotateCw",
-            v,
-            false,
-            !none,
-            Action::Skip(10),
-        );
-        f.icon_button(
-            Rect::new(x + 134, row, 35, 32),
+            Rect::new(volume_left, row, 35, 32),
             if v.muted || v.volume == 0.0 {
                 "VolumeX"
             } else {
@@ -939,9 +956,9 @@ fn bottom(f: &mut Frame, v: View<'_>) {
             true,
             Action::Mute,
         );
-        if v.w > 239 {
-            let left = x + 175;
-            let width = 58.min(v.w - left - 12);
+        let left = volume_left + 41;
+        let width = 58.min(v.w - left - 12);
+        if width >= 24 {
             let volume = if v.muted {
                 0.0
             } else {
@@ -958,12 +975,13 @@ fn bottom(f: &mut Frame, v: View<'_>) {
                     width,
                 });
             }
-            let status = if v.w >= 385 {
+            let space = v.w - left - width - 14;
+            let status = if space >= 85 {
                 format!("{}  /  {}", time(v.position), time(v.duration))
             } else {
                 time(v.position)
             };
-            if v.w >= 320 {
+            if space >= 36 {
                 f.text(left + width + 10, row + 10, 11, 7, TEXT, false, &status);
             }
         }
@@ -1319,7 +1337,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
         }
     };
     let width = match menu {
-        Menu::Open => (v.w - 57).min(pixels(212)),
+        Menu::Open => (v.w - OPEN_LEFT - 10).min(pixels(212)),
         Menu::Slideshow => (v.w - 20).min(pixels(247)),
         Menu::Context => (v.w - 16).min(pixels(200)),
         _ => (v.w - pixels(20)).min(pixels(390)),
@@ -1343,7 +1361,7 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
     let end = (scroll + max_rows).min(rows.len());
     let height = (end - scroll) as i32 * row_height + pixels(34) + footer;
     let (x, y) = match menu {
-        Menu::Open => (47, 48),
+        Menu::Open => (OPEN_LEFT, 48),
         Menu::Slideshow => {
             let anchor = slideshow_anchor(v);
             (
@@ -1552,6 +1570,32 @@ mod tests {
         assert!(!frame.hits.iter().any(|(_, a)| *a == Action::StartSlideshow));
     }
 
+    #[test]
+    fn slideshow_chrome_and_its_hit_targets_hide_together() {
+        let media = Media {
+            kind: Kind::Image,
+            ..Default::default()
+        };
+        let mut v = video(&media);
+        v.photo_position = Some((1, 3));
+        v.slideshow_playing = true;
+        v.live_available = true;
+        v.controls_opacity = 0;
+        v.controls_interactive = false;
+        let hidden = draw(v);
+        assert!(hidden.osd().is_empty());
+        assert!(hidden.hits.is_empty());
+        v.controls_opacity = 255;
+        v.controls_interactive = true;
+        let shown = draw(v);
+        assert!(
+            shown
+                .hits
+                .iter()
+                .any(|(_, action)| *action == Action::StopSlideshow)
+        );
+    }
+
     fn video(media: &Media) -> View<'_> {
         View {
             w: 1100,
@@ -1568,6 +1612,7 @@ mod tests {
             stream: None,
             paused: false,
             muted: false,
+            repeat_one: false,
             fullscreen: false,
             native_titlebar: false,
             resize_grips: false,
@@ -1601,13 +1646,42 @@ mod tests {
         let frame = draw(video(&media));
         assert_eq!(frame.resolution(), (1000, 600));
         let point = |x, y| frame.layout.physical_point((x, y));
-        assert_eq!(frame.at(point(219, 574)), Action::SetVolume(0));
-        assert_eq!(frame.at(point(248, 574)), Action::SetVolume(50));
-        assert_eq!(frame.at(point(277, 574)), Action::SetVolume(100));
-        assert_eq!(frame.at(point(195, 574)), Action::Mute);
-        assert_eq!(frame.volume_at(point(310, 400), false), None);
-        assert_eq!(frame.volume_at(point(310, 400), true), Some(100));
+        assert_eq!(frame.at(point(254, 574)), Action::SetVolume(0));
+        assert_eq!(frame.at(point(283, 574)), Action::SetVolume(50));
+        assert_eq!(frame.at(point(312, 574)), Action::SetVolume(100));
+        assert_eq!(frame.at(point(230, 574)), Action::Mute);
+        assert_eq!(frame.volume_at(point(345, 400), false), None);
+        assert_eq!(frame.volume_at(point(345, 400), true), Some(100));
         assert_eq!(frame.volume_at(point(190, 400), true), Some(0));
+    }
+
+    #[test]
+    fn repeat_one_is_left_of_volume_and_highlights_when_enabled() {
+        for kind in [Kind::Video, Kind::Music] {
+            let media = Media {
+                kind,
+                ..Media::default()
+            };
+            let mut view = video(&media);
+            for width in [1100, 280] {
+                view.w = width;
+                let off = draw(view);
+                let (repeat, _) = off
+                    .hits
+                    .iter()
+                    .find(|(_, a)| *a == Action::RepeatOne)
+                    .unwrap();
+                let (volume, _) = off.hits.iter().find(|(_, a)| *a == Action::Mute).unwrap();
+                assert!(repeat.x + repeat.w <= volume.x);
+                assert_eq!(repeat.y, volume.y);
+
+                view.repeat_one = true;
+                assert_ne!(off.osd(), draw(view).osd());
+                view.repeat_one = false;
+            }
+            view.live_playing = true;
+            assert!(!draw(view).hits.iter().any(|(_, a)| *a == Action::RepeatOne));
+        }
     }
 
     #[test]
@@ -1762,10 +1836,9 @@ mod tests {
         let frame = draw(view);
         assert!(frame.osd().contains(r"\1a&H7F&"));
         assert!(
-            frame
-                .osd()
-                .lines()
-                .any(|line| line.contains(SMALL_LOGO[0].1) && line.contains(r"\1a&H7F&"))
+            frame.osd().lines().any(
+                |line| line.contains(icon_path("FolderOpen", 14)) && line.contains(r"\1a&H7F&")
+            )
         );
         assert!(
             frame
@@ -1780,5 +1853,24 @@ mod tests {
         view.controls_opacity = 0;
         let frame = draw(view);
         assert!(frame.osd().is_empty());
+    }
+
+    #[test]
+    fn open_button_and_menu_align_at_the_left_edge() {
+        let media = Media::default();
+        let mut view = video(&media);
+        let frame = draw(view);
+        assert_eq!(
+            frame.at(frame.layout.physical_point((OPEN_LEFT + 10, 20))),
+            Action::Menu(Menu::Open),
+        );
+        view.menu = Some(Menu::Open);
+        let frame = draw(view);
+        let (panel, _) = frame
+            .hits
+            .iter()
+            .find(|(_, a)| *a == Action::Scroll(0))
+            .unwrap();
+        assert_eq!(panel.x, OPEN_LEFT);
     }
 }

@@ -1,10 +1,28 @@
+<p align="center">
+  <img src="assets/Kahve.png" alt="Coffee logo" width="96">
+</p>
+
 # Coffee
 
 Coffee is a native Rust player for video, music, and photos, using libmpv and FFmpeg.
 
+![Coffee playing a video on KDE Plasma, with the playback controls visible](screenshot.png)
+
+## Download
+
+**Coffee 0.4.0** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v0.4.0/SHA256SUMS.txt)
+
+| OS | Architecture |
+| --- | --- |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-media-player-0.4.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-media-player-0.4.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v0.4.0/coffee-0.4.0-windows-x86_64.zip) |
+
 ## Install
 
-Get the package for your system from the [releases page](https://github.com/arazgray/coffee/releases). Coffee requires **libmpv 0.41 or newer**.
+Coffee requires **libmpv 0.41 or newer**.
 
 - **Ubuntu, Kubuntu, and Debian-based systems:** use the `.deb` on a release that provides libmpv 0.41 or newer. Older stock repositories may not supply a new enough version.
 - **Fedora:** use the `.rpm` on Fedora 44 or newer. **Arch and other Linux distributions:** use the Linux `.tar.gz` with your distribution's libmpv, KDialog, and `xdg-utils`. The archive contains `bin/` and `share/` directories that can be installed under a user or system prefix.
@@ -16,10 +34,11 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 ## Playback
 
 - Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
+- **Repeat One**, just before the volume button, loops the current video or song without advancing the queue. Click it again to turn it off.
 - Open a photo to browse nearby images with **Previous** and **Next**. Photos switch without a fade or hiding the controls. Coffee preloads five photos on each side and their Live clips in the background, prioritizing the current Live clip. The RAM cache is bounded at 256 MiB (128 MiB per file); uncached files still open normally.
 - A same-named `.MOV` companion adds a **Live** badge. Click it to play the clip and automatically return to the still without adding a playlist item. Live Photo transitions blend directly into the next frame over 150 ms.
-- **Slideshow**, beside **Live** in the playback area, opens a dropdown with optional music and a **Play** button. Play enters fullscreen and advances every five seconds, looping through the folder. Press **Esc** to stop the slideshow and its music.
-- The photo bar has **Fit** (show the entire image), **Fill** (crop to fill the window), and **100%** (one image pixel per display pixel). The selected zoom carries over to the next photo.
+- **Slideshow**, beside **Live** in the playback area, opens a dropdown with optional music and a **Play** button. Play enters fullscreen and crossfades to the next photo every five seconds, looping through the folder. Move the mouse to reveal the hidden controls, or press **Esc** to stop the slideshow and its music.
+- The photo bar has **Fit** (show the entire image), **Fill** (crop to fill the window), and **100%** (one image pixel per display pixel). Drag across the photo to pan along any cropped axis. The selected zoom carries over to the next photo.
 - **Open Streams** uses the player's own dark URL dialog. It accepts HLS, DASH, and direct HTTP(S) URLs. Paste with **Ctrl+V** (or **Command+V** where supported).
 - The playlist supports `.coffee.json` and older `.kahve.json` files, plus `.m3u`/`.m3u8` import. Playlists refer to local paths and URLs; they don't copy media.
 - Double-click a photo or video to toggle fullscreen. Double-click open space on either control bar to maximize or restore. Right-click for playback actions and the current item's containing folder or playlist entry.
