@@ -1,10 +1,20 @@
 <p align="center">
   <img src="assets/Kahve.png" alt="Coffee logo" width="96">
+  <h1 align="center" style="display:inline">Coffee</h1>
 </p>
 
-# Coffee
+<p align="center">
+  <strong>Coffee is a native Rust player for video, music, and photos, using libmpv and FFmpeg.</strong><br>
+</p>
 
-Coffee is a native Rust player for video, music, and photos, using libmpv and FFmpeg.
+<p align="center">
+  <a href="https://github.com/arazgray/coffee/releases">
+    <img src="https://img.shields.io/github/v/release/arazgray/coffee?label=version&color=brightgreen" alt="Version">
+  </a>
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  <img src="https://img.shields.io/github/last-commit/arazgray/coffee" alt="Last Commit">
+  <img src="https://img.shields.io/github/languages/top/arazgray/coffee" alt="Top Language">
+</p>
 
 ![Coffee playing a video on KDE Plasma, with the playback controls visible](screenshot.png)
 
