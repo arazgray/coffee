@@ -1,0 +1,47 @@
+name: Verify Coffee 1.6 macOS shortcuts
+
+on:
+  push:
+    branches: [verify-macos-shortcuts]
+
+permissions:
+  contents: read
+
+jobs:
+  keyboard:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download the published macOS package
+        run: |
+          archive=coffee-1.6.0-macos-${{ matrix.arch }}.zip
+          mkdir package
+          cd package
+          gh release download v1.6 --repo arazgray/coffee --pattern "$archive" --pattern SHA256SUMS.txt
+          grep -F "  $archive" SHA256SUMS.txt | shasum -a 256 --check
+          ditto -x -k "$archive" .
+          codesign --verify --strict Coffee.app
+      - name: Install playback dependencies
+        run: |
+          brew install mpv libheif ffmpeg
+          brew list --versions mpv
+      - name: Compare AppKit key events with the same libmpv key bindings
+        run: |
+          mpv="$(brew --prefix mpv)"
+          clang -Wall -Wextra -fobjc-arc -dynamiclib -framework AppKit \
+            -I"$mpv/include" -L"$mpv/lib" -lmpv \
+            tests/macos-key-probe.m -o "$RUNNER_TEMP/macos-key-probe.dylib"
+          python3 tests/macos-keyboard.py "$PWD/package/Coffee.app/Contents/MacOS/Coffee" \
+            "$RUNNER_TEMP/macos-key-probe.dylib" "$mpv/lib/libmpv.2.dylib"
