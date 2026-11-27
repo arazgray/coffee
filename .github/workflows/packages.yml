@@ -98,6 +98,10 @@ jobs:
         run: |
           ditto -x -k dist/*.zip installed
           codesign --verify --strict installed/Coffee.app
+          plist=installed/Coffee.app/Contents/Info.plist
+          test "$(plutil -extract LSEnvironment.MPVBUNDLE raw -o - "$plist")" = true
+          icon=$(plutil -extract CFBundleIconFile raw -o - "$plist")
+          test -s "installed/Coffee.app/Contents/Resources/$icon.icns"
           installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/animated.webp
           output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/grid.heic)
           printf '%s\n' "$output" | grep -F '128 × 96'

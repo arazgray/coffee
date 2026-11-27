@@ -339,13 +339,14 @@ impl Engine {
         } else {
             let wayland =
                 std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
+            let geometry = crate::platform::initial_window_geometry();
             for (key, value) in [
                 ("vo", "gpu-next"),
                 ("force-window", "immediate"),
                 ("hwdec", "auto-safe"),
                 ("target-colorspace-hint", "auto"),
                 ("target-colorspace-hint-mode", "target"),
-                ("geometry", "1050x630"),
+                ("geometry", &geometry),
                 ("auto-window-resize", "no"),
                 ("keepaspect-window", "no"),
                 // The compositor provides resize cursors for a decorated

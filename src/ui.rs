@@ -119,14 +119,20 @@ impl Rect {
 struct Layout {
     physical: (i32, i32),
     logical: (i32, i32),
+    backing_scale: f64,
 }
 
 impl Layout {
-    fn new(w: i32, h: i32) -> Self {
-        let logical = |n: i32| ((n * 100 + PERCENT / 2) / PERCENT).max(1);
+    fn new(w: i32, h: i32, backing_scale: f64) -> Self {
+        let logical = |n: i32| {
+            (f64::from(n) * 100.0 / (f64::from(PERCENT) * backing_scale))
+                .round()
+                .max(1.0) as i32
+        };
         Self {
             physical: (w, h),
             logical: (logical(w), logical(h)),
+            backing_scale,
         }
     }
     fn logical_point(&self, (x, y): (i32, i32)) -> (f64, f64) {
@@ -145,7 +151,7 @@ impl Layout {
         (x(r.x), y(r.y), x(r.x + r.w) - x(r.x), y(r.y + r.h) - y(r.y))
     }
     fn pixel_aligned_icon(&self, (x, y): (i32, i32), size: i32) -> ((f64, f64), (f64, f64)) {
-        let physical_size = f64::from(pixels(size));
+        let physical_size = (f64::from(pixels(size)) * self.backing_scale).round();
         let axis = |center: i32, logical: i32, physical: i32| {
             let scale = f64::from(physical) / f64::from(logical);
             let origin = (f64::from(center) * scale - physical_size / 2.0).round();
@@ -450,6 +456,7 @@ pub struct TimelineView {
 pub struct View<'a> {
     pub w: i32,
     pub h: i32,
+    pub backing_scale: f64,
     pub mouse: (i32, i32),
     pub media: &'a Media,
     pub photo_position: Option<(usize, usize)>,
@@ -514,8 +521,8 @@ fn seek_track(w: i32, bar_y: i32) -> Rect {
     Rect::new(13, bar_y + 2, w - 26, 17)
 }
 
-pub fn seek_hover(dimensions: (i32, i32), point: (i32, i32)) -> Option<SeekHover> {
-    let layout = Layout::new(dimensions.0, dimensions.1);
+pub fn seek_hover((w, h): (i32, i32), backing_scale: f64, point: (i32, i32)) -> Option<SeekHover> {
+    let layout = Layout::new(w, h, backing_scale);
     let (w, h) = layout.logical;
     if w < 120 || h < 120 {
         return None;
@@ -581,13 +588,13 @@ fn subtitle_lift(w: i32, controls: bool) -> i32 {
     if controls { video_bar_height(w) + 6 } else { 0 }
 }
 
-pub fn subtitle_position((w, h): (i32, i32), controls: bool) -> u8 {
-    let (w, h) = Layout::new(w, h).logical;
+pub fn subtitle_position((w, h): (i32, i32), backing_scale: f64, controls: bool) -> u8 {
+    let (w, h) = Layout::new(w, h, backing_scale).logical;
     ((h - subtitle_lift(w, controls)).max(0) * 100 / h) as u8
 }
 
 pub fn draw(mut v: View<'_>) -> Frame {
-    let mut f = Frame::new(Layout::new(v.w, v.h));
+    let mut f = Frame::new(Layout::new(v.w, v.h, v.backing_scale));
     (v.w, v.h) = f.resolution();
     v.mouse = floor(f.layout.logical_point(v.mouse));
     v.context_anchor = v
@@ -2189,6 +2196,7 @@ mod tests {
         View {
             w: 1100,
             h: 660,
+            backing_scale: 1.0,
             mouse: (0, 0),
             media,
             photo_position: None,
@@ -2315,10 +2323,10 @@ mod tests {
     #[test]
     fn subtitles_rise_when_the_bar_is_visible_in_wide_and_compact_views() {
         for (width, height) in [(1100, 660), (480, 440)] {
-            let (w, h) = Layout::new(width, height).logical;
-            let pos = subtitle_position((width, height), true);
+            let (w, h) = Layout::new(width, height, 1.0).logical;
+            let pos = subtitle_position((width, height), 1.0, true);
             assert!(i32::from(100 - pos) * h / 100 >= video_bar_height(w));
-            assert_eq!(subtitle_position((width, height), false), 100);
+            assert_eq!(subtitle_position((width, height), 1.0, false), 100);
         }
     }
 
@@ -2489,7 +2497,7 @@ mod tests {
             let bar = h - video_bar_height(w);
             for x in [14, w / 2, w - 14] {
                 let point = frame.layout.physical_point((x, bar + 9));
-                let hover = seek_hover((width, v.h), point).unwrap();
+                let hover = seek_hover((width, v.h), v.backing_scale, point).unwrap();
                 assert_eq!(frame.at(point), Action::Seek(hover.fraction));
                 let (x, y, image_w, image_h) = hover.image_bounds;
                 assert!(x >= 0 && x + image_w <= width && y >= 0 && y + image_h < v.h);
@@ -2501,9 +2509,49 @@ mod tests {
                 }
             }
             assert!(
-                seek_hover((width, v.h), frame.layout.physical_point((w / 2, bar + 33))).is_none()
+                seek_hover(
+                    (width, v.h),
+                    v.backing_scale,
+                    frame.layout.physical_point((w / 2, bar + 33))
+                )
+                .is_none()
             );
         }
+    }
+
+    #[test]
+    fn retina_overlay_and_hit_targets_keep_their_size_in_points() {
+        let media = Media {
+            kind: Kind::Video,
+            ..Default::default()
+        };
+        let mut v = video(&media);
+        let standard = draw(v);
+        v.w *= 2;
+        v.h *= 2;
+        v.backing_scale = 2.0;
+        let retina = draw(v);
+        assert_eq!(standard.resolution(), retina.resolution());
+        let (w, h) = retina.resolution();
+        let center = standard
+            .layout
+            .physical_point((w / 2, h - video_bar_height(w) + 9));
+        let doubled = (center.0 * 2, center.1 * 2);
+        assert_eq!(standard.at(center), retina.at(doubled));
+        let hover = seek_hover((v.w, v.h), v.backing_scale, doubled).unwrap();
+        let baseline = seek_hover((v.w / 2, v.h / 2), 1.0, center).unwrap();
+        assert_eq!(retina.at(doubled), Action::Seek(hover.fraction));
+        assert_eq!(
+            (hover.image.w, hover.image.h),
+            (baseline.image.w, baseline.image.h)
+        );
+        // Both edges are rounded separately to keep the bitmap aligned.
+        assert!((hover.image_bounds.2 - 2 * baseline.image_bounds.2).abs() <= 2);
+        assert!((hover.image_bounds.3 - 2 * baseline.image_bounds.3).abs() <= 2);
+        assert_eq!(
+            subtitle_position((v.w, v.h), 2.0, true),
+            subtitle_position((v.w / 2, v.h / 2), 1.0, true)
+        );
     }
 
     #[test]
@@ -2544,19 +2592,20 @@ mod tests {
 
     #[test]
     fn icons_align_to_physical_pixels_without_stretching() {
-        let layout = Layout::new(1049, 631);
         let side = 19;
-        let (origin, zoom) = layout.pixel_aligned_icon((300, 444), side);
-        let check = |offset: f64, zoom: f64, physical: i32, logical: i32| {
-            let scale = f64::from(physical) / f64::from(logical);
-            let start = offset * scale;
-            assert!((start - start.round()).abs() < 0.0001);
-            assert!(
-                (f64::from(side) * zoom / 100.0 * scale - f64::from(pixels(side))).abs() < 0.0001
-            );
-        };
-        check(origin.0, zoom.0, layout.physical.0, layout.logical.0);
-        check(origin.1, zoom.1, layout.physical.1, layout.logical.1);
+        for (w, h, backing_scale) in [(1049, 631, 1.0), (2099, 1263, 2.0)] {
+            let layout = Layout::new(w, h, backing_scale);
+            let (origin, zoom) = layout.pixel_aligned_icon((300, 444), side);
+            let check = |offset: f64, zoom: f64, physical: i32, logical: i32| {
+                let scale = f64::from(physical) / f64::from(logical);
+                let start = offset * scale;
+                assert!((start - start.round()).abs() < 0.0001);
+                let actual_size = f64::from(side) * zoom / 100.0 * scale;
+                assert!((actual_size - f64::from(pixels(side)) * backing_scale).abs() < 0.0001);
+            };
+            check(origin.0, zoom.0, layout.physical.0, layout.logical.0);
+            check(origin.1, zoom.1, layout.physical.1, layout.logical.1);
+        }
     }
 
     #[test]

@@ -166,6 +166,7 @@ struct Timings {
     reverse: bool,
     seekable: bool,
     dimensions: (i32, i32),
+    backing_scale: f64,
     pan_bounds: PanBounds,
     mouse: Option<(i32, i32)>,
 }
@@ -204,6 +205,15 @@ impl Timings {
             reverse: mpv.get("play-direction").as_str() == Some("backward"),
             seekable: mpv.get("seekable").as_bool() == Some(true),
             dimensions: size,
+            // Cocoa reports the video surface and pointer in backing pixels.
+            #[cfg(target_os = "macos")]
+            backing_scale: mpv
+                .get("display-hidpi-scale")
+                .as_f64()
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .unwrap_or(1.0),
+            #[cfg(not(target_os = "macos"))]
+            backing_scale: 1.0,
             pan_bounds: PanBounds::from_margins(
                 size,
                 ["ml", "mr", "mt", "mb"].map(|k| dimensions[k].as_i64().unwrap_or_default()),
@@ -1977,6 +1987,8 @@ impl App {
             }
             let (w, h) = timing.dimensions;
             let resize = timing.dimensions != self.timing.dimensions;
+            let backing_scale = timing.backing_scale;
+            let rescale = backing_scale != self.timing.backing_scale;
             if timing.mouse.is_some() && timing.mouse != self.timing.mouse {
                 let now = Instant::now();
                 self.hovered = now;
@@ -2031,6 +2043,7 @@ impl App {
             let controls_opacity = self.controls.update(show_controls, Instant::now());
             let subtitle_position = ui::subtitle_position(
                 (w, h),
+                backing_scale,
                 self.media.kind == Kind::Video && controls_opacity > 0,
             );
             let caption = self.subtitles.sync(&self.mpv, subtitle_position);
@@ -2045,7 +2058,7 @@ impl App {
                 .then(|| {
                     self.timing
                         .mouse
-                        .and_then(|mouse| ui::seek_hover((w, h), mouse))
+                        .and_then(|mouse| ui::seek_hover((w, h), backing_scale, mouse))
                 })
                 .flatten();
             let preview_allowed = !matches!(prepare_status, Some(prepare::Status::Running(..)))
@@ -2063,6 +2076,7 @@ impl App {
             let frame = ui::draw(View {
                 w,
                 h,
+                backing_scale,
                 mouse: self.timing.mouse.unwrap_or((-100, -100)),
                 media: &self.media,
                 photo_position: self
@@ -2154,6 +2168,7 @@ impl App {
                 },
             });
             if resize
+                || rescale
                 || self
                     .frame
                     .as_ref()

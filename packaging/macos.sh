@@ -28,6 +28,11 @@ cat > "$app/Info.plist" <<EOF
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
     <key>CFBundleIconFile</key><string>Coffee</string>
+    <!-- Tell libmpv to keep the bundle icon instead of replacing it. -->
+    <key>LSEnvironment</key>
+    <dict>
+        <key>MPVBUNDLE</key><string>true</string>
+    </dict>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSRequiresAquaSystemAppearance</key><false/>
 </dict>

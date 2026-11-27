@@ -195,11 +195,37 @@ pub fn error_dialog(message: &str) {
     }
 }
 
+const DEFAULT_WINDOW_SIZE: (i32, i32) = (1050, 630);
+#[cfg(target_os = "macos")]
+static MAC_WINDOW_SIZE: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+
+pub fn initial_window_geometry() -> String {
+    #[cfg(target_os = "macos")]
+    let (w, h) = MAC_WINDOW_SIZE
+        .get()
+        .copied()
+        .unwrap_or(DEFAULT_WINDOW_SIZE);
+    #[cfg(not(target_os = "macos"))]
+    let (w, h) = DEFAULT_WINDOW_SIZE;
+    format!("{w}x{h}")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_window_size((visible_w, visible_h): (f64, f64), backing_scale: f64) -> (i32, i32) {
+    let (w, h) = DEFAULT_WINDOW_SIZE;
+    let fit = (visible_w * 0.9 / f64::from(w))
+        .min(visible_h * 0.9 / f64::from(h))
+        .clamp(0.01, 1.0);
+    let to_pixels = |points| (f64::from(points) * fit * backing_scale).round() as i32;
+    (to_pixels(w), to_pixels(h))
+}
+
 #[cfg(target_os = "macos")]
 pub fn cocoa_loop(run: fn()) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
         NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
+        NSScreen,
     };
     let marker = MainThreadMarker::new().expect("Cocoa must run on the main thread");
     let app = NSApplication::sharedApplication(marker);
@@ -207,11 +233,31 @@ pub fn cocoa_loop(run: fn()) {
     // Keep Cocoa's native frame and the player UI in dark mode.
     let dark = unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) };
     app.setAppearance(dark.as_deref());
+    if let Some(screen) = NSScreen::mainScreen(marker) {
+        let visible = screen.visibleFrame().size;
+        // mpv interprets absolute geometry sizes as backing pixels on Cocoa.
+        let _ = MAC_WINDOW_SIZE.set(mac_window_size(
+            (visible.width, visible.height),
+            screen.backingScaleFactor(),
+        ));
+    }
     std::thread::spawn(move || {
         run();
         std::process::exit(0);
     });
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mac_window_geometry_stays_the_same_size_in_points_and_fits_small_displays() {
+        assert_eq!(mac_window_size((1440.0, 875.0), 1.0), (1050, 630));
+        assert_eq!(mac_window_size((1440.0, 875.0), 2.0), (2100, 1260));
+        assert_eq!(mac_window_size((900.0, 520.0), 2.0), (1560, 936));
+    }
 }
 
 pub fn ensure_dark_frame() {
