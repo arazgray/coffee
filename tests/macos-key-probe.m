@@ -4,6 +4,7 @@
 #import <mpv/client.h>
 
 static dispatch_source_t timer;
+static NSWindow *diagnostic_window;
 static unsigned long last_request;
 
 static void observe_key(NSEvent *event) {
@@ -52,7 +53,20 @@ int mpv_initialize(mpv_handle *mpv) {
     if (mpv_set_option_string(mpv, "input-ipc-server", getenv("COFFEE_PROBE_SOCKET")) < 0)
         return MPV_ERROR_GENERIC;
     mpv_set_option_string(mpv, "ao", "null");
+    mpv_set_option_string(mpv, "hwdec", "no");
+    BOOL diagnostic = getenv("COFFEE_PROBE_DIAGNOSTIC") != NULL;
+    if (diagnostic)
+        mpv_set_option_string(mpv, "vo", "null");
+    else
+        mpv_set_option_string(mpv, "gpu-sw", "yes");
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (diagnostic) {
+            diagnostic_window = [[NSWindow alloc] initWithContentRect:NSMakeRect(150, 150, 480, 270)
+                styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                backing:NSBackingStoreBuffered defer:NO];
+            diagnostic_window.title = @"Coffee keyboard probe (no GPU)";
+            [diagnostic_window makeKeyAndOrderFront:nil];
+        }
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp
             handler:^NSEvent *(NSEvent *event) {
                 observe_key(event);

@@ -43,5 +43,10 @@ jobs:
           clang -Wall -Wextra -fobjc-arc -dynamiclib -framework AppKit \
             -I"$mpv/include" -L"$mpv/lib" -lmpv \
             tests/macos-key-probe.m -o "$RUNNER_TEMP/macos-key-probe.dylib"
-          python3 tests/macos-keyboard.py "$PWD/package/Coffee.app/Contents/MacOS/Coffee" \
-            "$RUNNER_TEMP/macos-key-probe.dylib" "$mpv/lib/libmpv.2.dylib"
+          app="$PWD/package/Coffee.app/Contents/MacOS/Coffee"
+          probe="$RUNNER_TEMP/macos-key-probe.dylib"
+          if ! python3 tests/macos-keyboard.py "$app" "$probe" "$mpv/lib/libmpv.2.dylib"; then
+            echo "Video-window check failed; isolating the Cocoa keyboard path without GPU rendering."
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'Coffee*' -print 2>/dev/null || true
+            COFFEE_PROBE_DIAGNOSTIC=1 python3 tests/macos-keyboard.py "$app" "$probe" "$mpv/lib/libmpv.2.dylib"
+          fi

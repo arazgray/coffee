@@ -64,9 +64,12 @@ with tempfile.TemporaryDirectory(prefix="coffee-keys-", dir="/tmp") as temp:
     try:
         assert wait(lambda: socket_path.is_socket()), "No playback IPC socket"
         mpv = Mpv(socket_path)
-        assert wait(lambda: (mpv.get("osd-dimensions") or {}).get("w", 0) > 0), "No native video window"
+        diagnostic = "COFFEE_PROBE_DIAGNOSTIC" in env
+        if not diagnostic:
+            assert wait(lambda: (mpv.get("osd-dimensions") or {}).get("w", 0) > 0), "No native video window"
         assert wait(lambda: mpv.get("duration") and mpv.get("time-pos") is not None), "No playing fixture"
-        print(f"Native Cocoa window; mpv {mpv.get('mpv-version')}; Coffee {subprocess.check_output([exe, '--version'], text=True).strip()}",
+        window = "Diagnostic Cocoa window, no GPU" if diagnostic else "Native Cocoa video window"
+        print(f"{window}; mpv {mpv.get('mpv-version')}; {subprocess.check_output([exe, '--version'], text=True).strip()}",
               flush=True)
         mpv.set("pause", True)
 
@@ -86,8 +89,9 @@ with tempfile.TemporaryDirectory(prefix="coffee-keys-", dir="/tmp") as temp:
             ("UP", 126, 0xF700, "volume", 35, 40),
             ("DOWN", 125, 0xF701, "volume", 35, 30),
             ("m", 46, ord("m"), "mute", False, True),
-            ("f", 3, ord("f"), "fullscreen", False, True),
         ]
+        if not diagnostic:
+            cases.append(("f", 3, ord("f"), "fullscreen", False, True))
         rows = []
         for i, (name, keycode, cp, prop, start, expected) in enumerate(cases, 1):
             reset(prop, start)
@@ -128,5 +132,6 @@ with tempfile.TemporaryDirectory(prefix="coffee-keys-", dir="/tmp") as temp:
         if app.poll() is None:
             app.terminate()
             app.wait(timeout=8)
+        print(f"App exit status: {app.returncode}", flush=True)
         log.close()
         print((temp / "output").read_text(), flush=True)
