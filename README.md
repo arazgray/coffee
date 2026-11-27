@@ -37,7 +37,7 @@ Coffee requires **libmpv 0.41 or newer**.
 - **Ubuntu, Kubuntu, and Debian-based systems:** use the `.deb` on a release that provides libmpv 0.41 or newer. Older stock repositories may not supply a new enough version.
 - **Fedora:** use the `.rpm` on Fedora 44 or newer. **Arch and other Linux distributions:** use the Linux `.tar.gz` with your distribution's libmpv, KDialog, and `xdg-utils`. The archive contains `bin/` and `share/` directories that can be installed under a user or system prefix.
 - **Windows x64:** unzip the Windows archive. Install [MSYS2](https://www.msys2.org/) and run `pacman -S mingw-w64-ucrt-x86_64-mpv mingw-w64-ucrt-x86_64-libheif` in its **UCRT64** terminal. Launch `Coffee.exe`. Coffee looks for MSYS2 under `C:\msys64` by default, or under `MSYS2_ROOT` if set.
-- **macOS:** run `brew install mpv libheif`, extract the zip for your CPU, and open `Coffee.app`. The app is not notarized. Coffee checks the standard Apple Silicon and Intel Homebrew prefixes.
+- **macOS (Apple Silicon and Intel):** run `brew install --cask arazgray/tap/coffee` to install Coffee and its dependencies from the [project’s Homebrew tap](https://github.com/arazgray/homebrew-tap). For a manual install, run `brew install mpv libheif ffmpeg` and extract the zip for your CPU. The app is not notarized, so macOS may block it on first launch.
 
 To build from source, install Rust and run `cargo test --locked` and `cargo build --release --locked`. On Linux, `sh install.sh` installs the result for the current user. `coffee --smoke-test path/to/media` checks opening and decoding a file without creating a player window. `COFFEE_LIBMPV` can point to a different libmpv installation.
 
