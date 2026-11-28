@@ -2,6 +2,7 @@
 #import <dispatch/dispatch.h>
 #import <dlfcn.h>
 #import <mpv/client.h>
+#import <unistd.h>
 
 static NSWindow *probe_window;
 static unsigned last_id;
@@ -43,10 +44,18 @@ int mpv_initialize(mpv_handle *mpv) {
     void *provider = dlopen(getenv("COFFEE_TEST_PROVIDER"), RTLD_NOW | RTLD_FIRST);
     int (*initialize)(mpv_handle *) = provider ? dlsym(provider, "mpv_initialize") : NULL;
     if (!initialize) return MPV_ERROR_GENERIC;
-    if (mpv_set_option_string(mpv, "input-ipc-server", getenv("COFFEE_TEST_IPC")) < 0)
+    char socket_path[512];
+    const char *dir = getenv("COFFEE_TEST_IPC_DIR");
+    const char *ipc = getenv("COFFEE_TEST_IPC");
+    if (dir) {
+        snprintf(socket_path, sizeof(socket_path), "%s/%d.sock", dir, getpid());
+        ipc = socket_path;
+    }
+    if (mpv_set_option_string(mpv, "input-ipc-server", ipc) < 0)
         return MPV_ERROR_GENERIC;
     mpv_set_option_string(mpv, "ao", "null");
     mpv_set_option_string(mpv, "vo", "null");
+    if (dir) return initialize(mpv);
     dispatch_async(dispatch_get_main_queue(), ^{
         // Keep native AppKit event delivery, independent of CI GPU support.
         probe_window = [[NSWindow alloc] initWithContentRect:NSMakeRect(150, 150, 480, 270)

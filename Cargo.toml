@@ -1,6 +1,6 @@
 [package]
 name = "coffee"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2024"
 description = "Coffee, a native libmpv media player"
 
@@ -20,6 +20,7 @@ rfd = { version = "0.15", default-features = false }
 block2 = "0.6"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSAppearance", "NSEvent", "NSResponder", "NSRunningApplication", "NSScreen", "NSWindow", "block2", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSNotification", "NSObject", "NSString", "NSURL"] }
 
 [build-dependencies]
 serde_json = "1"

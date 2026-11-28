@@ -276,11 +276,88 @@ fn mac_key_name(
 }
 
 #[cfg(target_os = "macos")]
+mod cocoa_launch {
+    use objc2::{
+        DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
+    };
+    use objc2_app_kit::{NSApplication, NSApplicationDelegate};
+    use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSURL};
+    use std::{cell::RefCell, sync::mpsc::Sender};
+
+    type Start = Box<dyn FnOnce(Vec<String>) + Send>;
+
+    pub(super) struct State {
+        start: Option<Start>,
+        startup_files: Vec<String>,
+        input: Sender<crate::Input>,
+    }
+
+    define_class!(
+        // NSObject has no subclassing requirements. Finder sends these
+        // callbacks on the AppKit thread.
+        #[unsafe(super = NSObject)]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = RefCell<State>]
+        pub(super) struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl NSApplicationDelegate for Delegate {
+            #[unsafe(method(application:openURLs:))]
+            fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
+                let files = (0..urls.count()).filter_map(|index| {
+                    let url = urls.objectAtIndex(index);
+                    if url.isFileURL() {
+                        url.path()
+                    } else {
+                        url.absoluteString()
+                    }
+                    .map(|path| path.to_string())
+                });
+                let mut state = self.ivars().borrow_mut();
+                if state.start.is_some() {
+                    state.startup_files.extend(files);
+                } else {
+                    let _ = state.input.send(crate::Input::Launch(files.collect()));
+                }
+            }
+
+            #[unsafe(method(applicationDidFinishLaunching:))]
+            fn did_finish_launching(&self, _notification: &NSNotification) {
+                let mut state = self.ivars().borrow_mut();
+                if let Some(run) = state.start.take() {
+                    let files = std::mem::take(&mut state.startup_files);
+                    std::thread::spawn(move || {
+                        run(files);
+                        std::process::exit(0);
+                    });
+                }
+            }
+        }
+    );
+
+    impl Delegate {
+        pub(super) fn new(
+            marker: MainThreadMarker,
+            start: impl FnOnce(Vec<String>) + Send + 'static,
+            input: Sender<crate::Input>,
+        ) -> Retained<Self> {
+            let delegate = Self::alloc(marker).set_ivars(RefCell::new(State {
+                start: Some(Box::new(start)),
+                startup_files: Vec::new(),
+                input,
+            }));
+            unsafe { msg_send![super(delegate), init] }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn cocoa_loop(
-    run: impl FnOnce() + Send + 'static,
-    keys: std::sync::mpsc::Sender<crate::Input>,
+    run: impl FnOnce(Vec<String>) + Send + 'static,
+    input: std::sync::mpsc::Sender<crate::Input>,
 ) {
-    use objc2::MainThreadMarker;
+    use objc2::{MainThreadMarker, runtime::ProtocolObject};
     use objc2_app_kit::{
         NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
         NSEvent, NSEventMask, NSEventModifierFlags as Modifiers, NSScreen,
@@ -301,6 +378,8 @@ pub fn cocoa_loop(
             screen.backingScaleFactor(),
         ));
     }
+    let delegate = cocoa_launch::Delegate::new(marker, run, input.clone());
+    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     // mpv's executable forwards key events in its own NSApplication subclass.
     // libmpv uses our AppKit loop, so hand player keys to the Rust worker.
     let keyboard = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
@@ -336,7 +415,7 @@ pub fn cocoa_loop(
             command,
         );
         if let Some(name) = name
-            && keys
+            && input
                 .send(crate::Input::MacKey(name, key_event.isARepeat()))
                 .is_ok()
         {
@@ -349,11 +428,8 @@ pub fn cocoa_loop(
     let monitor = unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &keyboard)
     };
-    std::thread::spawn(move || {
-        run();
-        std::process::exit(0);
-    });
     app.run();
+    app.setDelegate(None);
     if let Some(monitor) = monitor {
         unsafe { NSEvent::removeMonitor(&monitor) };
     }

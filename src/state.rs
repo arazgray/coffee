@@ -123,7 +123,12 @@ impl RenderMode {
 pub const PHOTO_EXTENSIONS: &str = "jpg jpeg jfif jpe png apng webp gif avif bmp tif tiff jxl heic heif heics heifs qoi ico jp2 j2k j2c tga dds hdr exr pbm pgm ppm pam";
 
 pub fn image_path(path: &str) -> bool {
-    Path::new(path)
+    let url = if is_stream(path) {
+        url::Url::parse(path).ok()
+    } else {
+        None
+    };
+    Path::new(url.as_ref().map_or(path, |url| url.path()))
         .extension()
         .and_then(|s| s.to_str())
         .is_some_and(|s| {

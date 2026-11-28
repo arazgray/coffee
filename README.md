@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 1.7** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.7/SHA256SUMS.txt)
+**Coffee 1.8** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.8/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-media-player-1.7.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-media-player-1.7.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.7/coffee-1.7.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-media-player-1.8.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-media-player-1.8.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-windows-x86_64.zip) |
 
 ## Install
 
@@ -45,7 +45,8 @@ To build from source, install Rust and run `cargo test --locked` and `cargo buil
 
 ## Playback
 
-- Drop media on the window to add it to the queue and play the first dropped item. **Open → Add files to queue** appends without interrupting playback.
+- Music and video share one playback window. Open or drop more songs and videos to add them to the playlist and start the first new item. **Open → Add files to queue** appends without interrupting active playback.
+- Opening or dropping a photo creates a separate viewer without interrupting music or video.
 - **Repeat One**, just before the volume button, loops the current video or song without advancing the queue. Click it again to turn it off.
 - The **gear icon** opens playback settings, including HDR, decoder, and rendering. Use **−** and **+** around the current speed to step down or up from **1.0×**. The range is **−64×** (reverse) to **64×** (forward). Reverse is available for seekable media and uses software decoding for video. Some formats play more slowly in reverse, and embedded subtitles may not show.
 - Hover over the seek bar to see the timestamp and a thumbnail. Coffee builds a small thumbnail index in the background when you open a local video, so previews update as you move. An uncached area may take a moment on first hover. Hovering does not seek. Thumbnails use FFmpeg; seekable streams or unavailable frames show the timestamp without a thumbnail.

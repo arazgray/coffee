@@ -6,6 +6,7 @@ mod fonts;
 mod gpu;
 mod heif_source;
 mod image_source;
+mod launch;
 mod library;
 mod photos;
 mod platform;
@@ -20,6 +21,7 @@ mod ui;
 use crossfade::Crossfade;
 use engine::{Engine, Event, PointerEvent};
 use gpu::{DecodeChoice, Devices};
+use launch::{Mode as OpenMode, Request as OpenRequest};
 use photos::{PanBounds, PhotoFolder};
 use state::{
     Hdr, Kind, Media, PhotoZoom, RenderMode, SpeedStep, display_name, image_path, is_stream,
@@ -32,15 +34,6 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
-};
-#[cfg(unix)]
-use std::{
-    fs::DirBuilder,
-    io::{Read, Write},
-    os::unix::{
-        fs::DirBuilderExt,
-        net::{UnixListener, UnixStream},
-    },
 };
 use ui::{Action, Frame, Menu, View};
 
@@ -55,100 +48,12 @@ enum Picker {
 }
 
 enum Input {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     Launch(Vec<String>),
     #[cfg(target_os = "macos")]
     MacKey(String, bool),
     Picked(Picker, Option<String>),
     FontsLoaded(fonts::Catalog),
-}
-
-struct Runtime {
-    #[cfg(unix)]
-    socket: PathBuf,
-    dir: PathBuf,
-}
-
-impl Drop for Runtime {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        let _ = fs::remove_file(&self.socket);
-        let _ = fs::remove_file(self.dir.join("input.conf"));
-        let _ = fs::remove_dir(&self.dir);
-    }
-}
-
-#[cfg(unix)]
-fn connect(socket: &Path, files: &[String]) -> bool {
-    let Ok(mut client) = UnixStream::connect(socket) else {
-        return false;
-    };
-    let _ = client.set_write_timeout(Some(Duration::from_secs(2)));
-    serde_json::to_writer(&mut client, files).is_ok() && client.flush().is_ok()
-}
-
-#[cfg(unix)]
-fn runtime(files: &[String], tx: Sender<Input>) -> Result<Option<Runtime>, String> {
-    let base = env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .ok_or("Coffee needs a user runtime directory")?;
-    let root = base.join("coffee");
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&root)
-        .map_err(|e| e.to_string())?;
-    let socket = root.join("player.sock");
-    if connect(&socket, files) {
-        return Ok(None);
-    }
-    let dir = root.join(format!("window-{}", std::process::id()));
-    DirBuilder::new()
-        .mode(0o700)
-        .create(&dir)
-        .map_err(|e| e.to_string())?;
-    let listener = match UnixListener::bind(&socket) {
-        Ok(server) => server,
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            if connect(&socket, files) {
-                let _ = fs::remove_dir(&dir);
-                return Ok(None);
-            }
-            // A crash may have left this app's socket in its private directory.
-            use std::os::unix::fs::FileTypeExt;
-            if !fs::symlink_metadata(&socket).is_ok_and(|meta| meta.file_type().is_socket()) {
-                return Err("Coffee's runtime socket path is already in use".into());
-            }
-            fs::remove_file(&socket).map_err(|e| e.to_string())?;
-            UnixListener::bind(&socket).map_err(|e| e.to_string())?
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { break };
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let parsed = serde_json::from_reader::<_, Vec<String>>(stream.take(1024 * 1024));
-            if let Ok(files) = parsed
-                && tx.send(Input::Launch(files)).is_err()
-            {
-                break;
-            }
-        }
-    });
-    Ok(Some(Runtime { socket, dir }))
-}
-
-#[cfg(not(unix))]
-fn runtime(_files: &[String], _tx: Sender<Input>) -> Result<Option<Runtime>, String> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let dir = env::temp_dir().join(format!("coffee-{}-{nonce}", std::process::id()));
-    fs::create_dir(&dir).map_err(|error| error.to_string())?;
-    Ok(Some(Runtime { dir }))
 }
 
 #[derive(Default)]
@@ -330,12 +235,8 @@ impl QueueSnapshot {
         snapshot
     }
 
-    fn first_drop(&self, new: &Self) -> Option<usize> {
-        (self.current.is_some()
-            && self.current == new.current
-            && new.ids.len() > self.ids.len()
-            && new.ids.starts_with(&self.ids))
-        .then_some(self.ids.len())
+    fn appended_start(&self, new: &Self) -> Option<usize> {
+        (new.ids.len() > self.ids.len() && new.ids.starts_with(&self.ids)).then_some(self.ids.len())
     }
 }
 
@@ -413,6 +314,7 @@ impl ControlsFade {
 
 struct App {
     mpv: Engine,
+    playback: Option<launch::Playback>,
     tx: Sender<Input>,
     rx: Receiver<Input>,
     media: Media,
@@ -492,7 +394,7 @@ impl App {
         }
         let url = url.to_owned();
         self.stream_dialog(true)?;
-        self.queue(&[url], false, 0);
+        self.open_files([url], OpenMode::Play);
         Ok(())
     }
 
@@ -575,35 +477,65 @@ impl App {
         Ok(())
     }
 
-    fn queue(&mut self, paths: &[String], append: bool, current: usize) {
-        let mut valid = paths.iter().filter_map(|p| library::normalize(p));
-        if let Some(first) = valid.next() {
-            if !append {
-                self.stop_slideshow();
-                self.photo_switch = None;
-                self.photos = None;
-                self.clear_crossfade();
-                self.finish_live(false);
+    fn open_files(&mut self, files: impl IntoIterator<Item = String>, mode: OpenMode) {
+        let (request, photos) = OpenRequest::split(files, mode);
+        for path in photos {
+            if let Err(error) = launch::open_photo(&path) {
+                self.note(format!("Could not open {}: {error}", display_name(&path)));
             }
-            let _ = self.mpv.command(&[
-                "loadfile",
-                &first,
-                if append { "append-play" } else { "replace" },
-            ]);
-            for path in valid {
-                let _ = self.mpv.command(&["loadfile", &path, "append"]);
-            }
-            if !append && current != 0 {
-                let _ = self
-                    .mpv
-                    .command(&["playlist-play-index", &current.to_string()]);
-            }
-            if !append {
-                let _ = self.mpv.set("pause", "no");
-            }
-            // In-app opens, queue loads and Add files aren't native drops.
-            self.queue_snapshot = QueueSnapshot::read(&self.mpv);
         }
+        if !request.files.is_empty() {
+            let result = if self.playback.is_some() {
+                self.queue_playback(request)
+            } else {
+                request.spawn().map_err(|error| error.to_string())
+            };
+            if let Err(error) = result {
+                self.note(error);
+            }
+        }
+    }
+
+    fn queue_playback(&mut self, request: OpenRequest) -> Result<(), String> {
+        let Some((first, rest)) = request.files.split_first() else {
+            return Ok(());
+        };
+        let index = self.mpv.get("playlist-count").as_u64().unwrap_or_default() as usize;
+        let (flag, start) = match request.mode {
+            // `append-play` only starts playback when no entry is active.
+            OpenMode::Play => ("append", Some(index)),
+            OpenMode::Add => ("append-play", None),
+            OpenMode::Replace(current) => ("replace", Some(current)),
+        };
+        let result = (|| {
+            self.mpv.command(&["loadfile", first, flag])?;
+            for path in rest {
+                self.mpv.command(&["loadfile", path, "append"])?;
+            }
+            if let Some(start) = start {
+                self.menu = None;
+                // The first append to an empty player may already be playing.
+                if self.mpv.get("playlist-pos").as_u64() != Some(start as u64) {
+                    self.mpv
+                        .command(&["playlist-play-index", &start.to_string()])?;
+                }
+                self.mpv.set("pause", "no")?;
+            }
+            Ok(())
+        })();
+        self.queue_snapshot = QueueSnapshot::read(&self.mpv);
+        result
+    }
+
+    fn receive_launch(&mut self, request: OpenRequest) {
+        if request.files.is_empty() {
+            let _ = self.mpv.set("window-minimized", "no");
+            return;
+        }
+        if self.playback.is_some() && !matches!(request.mode, OpenMode::Add) {
+            let _ = self.mpv.set("window-minimized", "no");
+        }
+        self.open_files(request.files, request.mode);
     }
 
     fn prepare_photos(&mut self) {
@@ -662,23 +594,54 @@ impl App {
             return;
         }
         self.playlist_changed = None;
-        let before = std::mem::replace(&mut self.queue_snapshot, QueueSnapshot::read(&self.mpv));
-        // libmpv appends all drop entries in order. It auto-starts an empty
-        // playlist; otherwise select the first new entry without replacing
-        // the existing queue. Batch the notifications for multi-file drops.
-        if let Some(index) = before.first_drop(&self.queue_snapshot) {
-            self.stop_slideshow();
-            self.photo_switch = None;
-            self.clear_crossfade();
-            self.pending_click = None;
-            if let Err(error) = self
-                .mpv
-                .command(&["playlist-play-index", &index.to_string()])
-                .and_then(|()| self.mpv.set("pause", "no"))
+        let after = QueueSnapshot::read(&self.mpv);
+        if let Some(start) = self.queue_snapshot.appended_start(&after) {
+            let playlist = self.mpv.get("playlist");
+            let mut photos = Vec::new();
+            let mut playback = Vec::new();
+            let mut first_playback = None;
+            let mut remove = Vec::new();
+            for (index, entry) in playlist
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .skip(start)
             {
-                self.note(error);
+                let Some(path) = entry["filename"].as_str().and_then(library::normalize) else {
+                    continue;
+                };
+                if image_path(&path) {
+                    photos.push(path);
+                    remove.push(index);
+                } else if self.playback.is_none() {
+                    playback.push(path);
+                    remove.push(index);
+                } else {
+                    first_playback.get_or_insert(index - remove.len());
+                }
+            }
+            // mpv has already appended the drop. Pull the photos out of
+            // the playback queue without reloading its current item.
+            for index in remove.into_iter().rev() {
+                if let Err(error) = self.mpv.command(&["playlist-remove", &index.to_string()]) {
+                    self.note(error);
+                }
+            }
+            self.open_files(photos.into_iter().chain(playback), OpenMode::Play);
+            if let Some(index) = first_playback {
+                self.menu = None;
+                self.pending_click = None;
+                if let Err(error) = self
+                    .mpv
+                    .command(&["playlist-play-index", &index.to_string()])
+                    .and_then(|()| self.mpv.set("pause", "no"))
+                {
+                    self.note(error);
+                }
             }
         }
+        self.queue_snapshot = QueueSnapshot::read(&self.mpv);
     }
 
     fn note(&mut self, text: impl Into<String>) {
@@ -1264,15 +1227,11 @@ impl App {
                     let _ = self.mpv.command(&["keypress", &key]);
                 }
             }
-            #[cfg(unix)]
-            Input::Launch(files) => {
-                let _ = self.mpv.set("window-minimized", "no");
-                if !files.is_empty() {
-                    self.menu = None;
-                    self.queue(&files, false, 0);
-                    self.hovered = Instant::now();
-                }
-            }
+            #[cfg(target_os = "macos")]
+            Input::Launch(files) => self.receive_launch(OpenRequest {
+                files,
+                mode: OpenMode::Play,
+            }),
             Input::Picked(picker, value) => {
                 self.picker = false;
                 self.hovered = Instant::now();
@@ -1282,8 +1241,14 @@ impl App {
                 }
                 match picker {
                     Picker::Files | Picker::Add => {
-                        let files = value.lines().map(str::to_owned).collect::<Vec<_>>();
-                        self.queue(&files, matches!(picker, Picker::Add), 0);
+                        self.open_files(
+                            value.lines().map(str::to_owned),
+                            if matches!(picker, Picker::Add) {
+                                OpenMode::Add
+                            } else {
+                                OpenMode::Play
+                            },
+                        );
                     }
                     Picker::Subtitles => {
                         if let Err(e) = self.mpv.command(&["sub-add", &value, "select"]) {
@@ -1313,7 +1278,9 @@ impl App {
                         }
                     }
                     Picker::Load => match library::load(Path::new(&value)) {
-                        Ok(playlist) => self.queue(&playlist.files, false, playlist.current),
+                        Ok(playlist) => {
+                            self.open_files(playlist.files, OpenMode::Replace(playlist.current))
+                        }
                         Err(e) => self.note(e),
                     },
                 }
@@ -1843,7 +1810,7 @@ impl App {
                         )
                     });
                 }
-                if self.live.is_none() {
+                if self.playback.is_none() && self.live.is_none() {
                     self.prepare_photos();
                     if self.photos.is_none() {
                         self.stop_slideshow();
@@ -1944,6 +1911,7 @@ impl App {
         let wayland = env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
         let mut last_metadata = Instant::now();
         let mut last_frame = Instant::now() - Duration::from_secs(1);
+        let mut last_launch_poll = last_frame;
         #[cfg(windows)]
         let mut dark_hwnd = None;
         loop {
@@ -1967,6 +1935,21 @@ impl App {
                 self.receive(input);
             }
             self.play_dropped_files();
+            if last_launch_poll.elapsed() >= Duration::from_millis(60) {
+                last_launch_poll = Instant::now();
+                if let Some(playback) = &self.playback {
+                    match playback.pending() {
+                        Ok(requests) => {
+                            for request in requests {
+                                self.receive_launch(request);
+                            }
+                        }
+                        Err(error) => {
+                            self.note(format!("Could not receive open requests: {error}"))
+                        }
+                    }
+                }
+            }
             self.sync_font_input();
             if self
                 .pending_click
@@ -2261,7 +2244,11 @@ fn smoke(path: &str, cached: bool) -> Result<(), String> {
     Err("Timed out waiting for a decoded video frame or audio output".into())
 }
 
-fn entry(tx: Sender<Input>, rx: Receiver<Input>) -> Result<(), String> {
+fn entry(
+    tx: Sender<Input>,
+    rx: Receiver<Input>,
+    platform_files: Vec<String>,
+) -> Result<(), String> {
     let mut arguments = env::args_os().skip(1);
     let first = arguments.next();
     if first.as_deref().is_some_and(|x| x == "--smoke-test") {
@@ -2280,15 +2267,49 @@ fn entry(tx: Sender<Input>, rx: Receiver<Input>) -> Result<(), String> {
         println!("Coffee {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let files = first
-        .into_iter()
-        .chain(arguments)
-        .filter_map(|x| library::normalize(&x.to_string_lossy()))
-        .collect::<Vec<_>>();
-    let Some(runtime) = runtime(&files, tx.clone())? else {
-        return Ok(());
+    let (mode, first) = match first.as_deref().and_then(|arg| arg.to_str()) {
+        Some("--add-to-queue") => (OpenMode::Add, None),
+        Some("--replace-queue") => (
+            OpenMode::Replace(
+                arguments
+                    .next()
+                    .and_then(|n| n.to_str()?.parse().ok())
+                    .unwrap_or(0),
+            ),
+            None,
+        ),
+        _ => (OpenMode::Play, first),
     };
-    let input = runtime.dir.join("input.conf");
+    let (request, mut photos) = OpenRequest::split(
+        first
+            .into_iter()
+            .chain(arguments)
+            .filter(|path| {
+                !cfg!(target_os = "macos") || !path.to_string_lossy().starts_with("-psn_")
+            })
+            .map(|path| path.to_string_lossy().into_owned())
+            .chain(platform_files),
+        mode,
+    );
+    let photo = (request.files.is_empty() && !photos.is_empty()).then(|| photos.remove(0));
+    let root = launch::runtime_dir().map_err(|error| error.to_string())?;
+    let playback = if photo.is_none() {
+        launch::Playback::open(&root, &request).map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    for path in photos {
+        launch::open_photo(&path)
+            .map_err(|error| format!("Could not open {}: {error}", display_name(&path)))?;
+    }
+    if playback.is_none() && photo.is_none() {
+        return Ok(());
+    }
+    let runtime = tempfile::Builder::new()
+        .prefix("window-")
+        .tempdir_in(root)
+        .map_err(|error| error.to_string())?;
+    let input = runtime.path().join("input.conf");
     let bindings = include_str!("../assets/input.conf");
     #[cfg(target_os = "macos")]
     let bindings = [
@@ -2322,6 +2343,7 @@ fn entry(tx: Sender<Input>, rx: Receiver<Input>) -> Result<(), String> {
         .unwrap_or_else(env::temp_dir);
     let mut app = App {
         mpv,
+        playback,
         tx,
         rx,
         media: Media::default(),
@@ -2369,8 +2391,11 @@ fn entry(tx: Sender<Input>, rx: Receiver<Input>) -> Result<(), String> {
         queue_snapshot: QueueSnapshot::default(),
         playlist_changed: None,
     };
-    if !files.is_empty() {
-        app.queue(&files, false, 0);
+    if let Some(photo) = photo {
+        app.mpv.command(&["loadfile", &photo, "replace"])?;
+        app.queue_snapshot = QueueSnapshot::read(&app.mpv);
+    } else {
+        app.queue_playback(request)?;
     }
     app.run();
     Ok(())
@@ -2396,8 +2421,8 @@ fn dialog() -> Command {
     command
 }
 
-fn run_entry(tx: Sender<Input>, rx: Receiver<Input>) {
-    if let Err(error) = entry(tx, rx) {
+fn run_entry(tx: Sender<Input>, rx: Receiver<Input>, platform_files: Vec<String>) {
+    if let Err(error) = entry(tx, rx, platform_files) {
         eprintln!("Coffee: {error}");
         if !env::args_os().any(|arg| arg == "--smoke-test" || arg == "--version") {
             platform::error_dialog(&error);
@@ -2411,10 +2436,10 @@ fn main() {
     #[cfg(target_os = "macos")]
     if !env::args_os().any(|arg| arg == "--smoke-test" || arg == "--version") {
         let keys = tx.clone();
-        platform::cocoa_loop(move || run_entry(tx, rx), keys);
+        platform::cocoa_loop(move |files| run_entry(tx, rx, files), keys);
         return;
     }
-    run_entry(tx, rx);
+    run_entry(tx, rx, Vec::new());
 }
 
 #[cfg(test)]
@@ -2475,29 +2500,29 @@ mod tests {
             ids: vec![1, 2, 3, 4],
             current: Some(1),
         };
-        assert_eq!(before.first_drop(&batch), Some(2));
-        assert_eq!(batch.first_drop(&batch), None);
-        assert_eq!(QueueSnapshot::default().first_drop(&batch), None);
+        assert_eq!(before.appended_start(&batch), Some(2));
+        assert_eq!(batch.appended_start(&batch), None);
+        assert_eq!(QueueSnapshot::default().appended_start(&batch), Some(0));
         assert_eq!(
-            before.first_drop(&QueueSnapshot {
+            before.appended_start(&QueueSnapshot {
                 ids: vec![3, 4],
                 current: Some(3)
             }),
             None
         );
         assert_eq!(
-            before.first_drop(&QueueSnapshot {
+            before.appended_start(&QueueSnapshot {
                 ids: vec![1, 3, 4],
                 current: Some(1)
             }),
             None
         );
         assert_eq!(
-            before.first_drop(&QueueSnapshot {
+            before.appended_start(&QueueSnapshot {
                 ids: vec![1, 2, 3],
                 current: Some(2)
             }),
-            None
+            Some(2)
         );
     }
 }

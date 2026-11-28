@@ -28,6 +28,23 @@ cat > "$app/Info.plist" <<EOF
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
     <key>CFBundleIconFile</key><string>Coffee</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Media</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.audio</string>
+                <string>public.movie</string>
+                <string>public.video</string>
+                <string>public.image</string>
+                <string>org.matroska.mkv</string>
+                <string>org.webmproject.webm</string>
+            </array>
+        </dict>
+    </array>
     <!-- Tell libmpv to keep the bundle icon instead of replacing it. -->
     <key>LSEnvironment</key>
     <dict>

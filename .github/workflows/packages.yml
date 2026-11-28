@@ -113,6 +113,12 @@ jobs:
             -lmpv tests/macos-keyboard-probe.m -o "$probe"
           python3 tests/macos-keyboard.py \
             "$PWD/installed/Coffee.app/Contents/MacOS/Coffee" "$probe" "$mpv/lib/libmpv.2.dylib"
+      - name: Check Finder opens, separate photo windows, and the shared playback queue
+        run: |
+          mpv="$(brew --prefix mpv)"
+          probe="$RUNNER_TEMP/coffee-keyboard-probe.dylib"
+          python3 tests/desktop-open.py \
+            "$PWD/installed/Coffee.app/Contents/MacOS/Coffee" "$probe" "$mpv/lib/libmpv.2.dylib"
       - uses: actions/upload-artifact@v6
         with:
           name: macos-${{ matrix.arch }}
