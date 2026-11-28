@@ -232,7 +232,7 @@ mod tests {
             "one.MP4",
             "picture one.HEIC",
             "two.mp3",
-            "picture two.webp",
+            "picture two.PSD",
             "three.mkv",
         ]
         .map(str::to_owned);
@@ -244,7 +244,17 @@ mod tests {
         assert!(request.files[2].ends_with("three.mkv"));
         assert_eq!(photos.len(), 2);
         assert!(photos[0].ends_with("picture one.HEIC"));
-        assert!(photos[1].ends_with("picture two.webp"));
+        assert!(photos[1].ends_with("picture two.PSD"));
+    }
+
+    #[test]
+    fn tiff_variants_and_svg_open_in_photo_windows() {
+        let (request, photos) = Request::split(
+            ["one.TIF", "two.tiff", "three.tff", "four.SVG"].map(str::to_owned),
+            Mode::Play,
+        );
+        assert!(request.files.is_empty());
+        assert_eq!(photos.len(), 4);
     }
 
     #[test]

@@ -120,7 +120,7 @@ impl RenderMode {
     }
 }
 
-pub const PHOTO_EXTENSIONS: &str = "jpg jpeg jfif jpe png apng webp gif avif bmp tif tiff jxl heic heif heics heifs qoi ico jp2 j2k j2c tga dds hdr exr pbm pgm ppm pam";
+pub const PHOTO_EXTENSIONS: &str = "jpg jpeg jfif jpe png apng webp gif avif bmp tif tiff tff psd svg jxl heic heif heics heifs qoi ico jp2 j2k j2c tga dds hdr exr pbm pgm ppm pam";
 
 pub fn image_path(path: &str) -> bool {
     let url = if is_stream(path) {

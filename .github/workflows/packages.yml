@@ -26,12 +26,19 @@ jobs:
       - run: sh packaging/linux.sh
       - name: Test the Linux package on Ubuntu 26.04
         run: |
+          python3 tests/photo_formats.py target/photo-formats
           docker run --rm -v "$PWD:/coffee:ro" ubuntu:26.04 sh -ec '
             apt-get -qq update
             DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends /coffee/dist/*.deb libheif-plugin-libde265
             coffee --smoke-test --preload /coffee/tests/fixtures/animated.webp
             output=$(coffee --smoke-test --preload /coffee/tests/fixtures/grid.heic)
             printf "%s\n" "$output" | grep -F "128 × 96"
+            for file in /coffee/target/photo-formats/preview.*; do
+              output=$(coffee --smoke-test --preload "$file")
+              printf "%s\n" "$output" | grep -F "64 × 48"
+            done
+            svg=$(coffee --smoke-test /coffee/target/photo-formats/preview.svg)
+            printf "%s\n" "$svg" | grep -F "Format: png_pipe"
           '
       - uses: actions/upload-artifact@v6
         with:
@@ -71,6 +78,12 @@ jobs:
             if ($Result.ExitCode -ne 0) { exit $Result.ExitCode }
             if ($Fixture -eq 'grid.heic' -and -not (Select-String -Quiet -Path smoke.log -Pattern '128 × 96')) { exit 1 }
           }
+          python tests/photo_formats.py target/photo-formats
+          foreach ($File in Get-ChildItem target/photo-formats/preview.*) {
+            $Result = Start-Process installed/Coffee.exe -ArgumentList '--smoke-test', '--preload', "target/photo-formats/$($File.Name)" -Wait -PassThru -RedirectStandardOutput smoke.log
+            Get-Content smoke.log
+            if ($Result.ExitCode -ne 0 -or -not (Select-String -Quiet -Path smoke.log -Pattern '64 × 48')) { exit 1 }
+          }
       - uses: actions/upload-artifact@v6
         with:
           name: windows-x86_64
@@ -105,6 +118,11 @@ jobs:
           installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/animated.webp
           output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/grid.heic)
           printf '%s\n' "$output" | grep -F '128 × 96'
+          python3 tests/photo_formats.py target/photo-formats
+          for file in target/photo-formats/preview.*; do
+            output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload "$file")
+            printf '%s\n' "$output" | grep -F '64 × 48'
+          done
       - name: Verify macOS keyboard shortcuts
         run: |
           mpv="$(brew --prefix mpv)"

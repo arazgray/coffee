@@ -10,4 +10,4 @@ Terminal=false
 StartupNotify=false
 StartupWMClass=coffee
 Categories=AudioVideo;Audio;Video;Player;
-MimeType=video/mp4;video/webm;video/x-matroska;video/quicktime;video/mpeg;video/ogg;video/mp2t;video/x-msvideo;audio/mpeg;audio/mp4;audio/flac;audio/ogg;audio/vnd.wave;audio/x-wav;audio/aac;audio/opus;audio/x-opus+ogg;image/jpeg;image/png;image/apng;image/webp;image/gif;image/avif;image/bmp;image/tiff;image/heic;image/heif;image/jxl;image/qoi;image/jp2;
+MimeType=video/mp4;video/webm;video/x-matroska;video/quicktime;video/mpeg;video/ogg;video/mp2t;video/x-msvideo;audio/mpeg;audio/mp4;audio/flac;audio/ogg;audio/vnd.wave;audio/x-wav;audio/aac;audio/opus;audio/x-opus+ogg;image/jpeg;image/png;image/apng;image/webp;image/gif;image/avif;image/bmp;image/tiff;image/vnd.adobe.photoshop;image/svg+xml;image/heic;image/heif;image/jxl;image/qoi;image/jp2;

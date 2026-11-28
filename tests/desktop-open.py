@@ -8,6 +8,8 @@ import sys
 import tempfile
 import time
 
+from photo_formats import write_psd
+
 
 def wait(check, message, timeout=12):
     until = time.monotonic() + timeout
@@ -68,10 +70,10 @@ with tempfile.TemporaryDirectory(prefix="coffee-open-", dir="/tmp") as name:
     b.write_bytes(a.read_bytes())
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
                     "sine=frequency=440:duration=30", song], check=True)
-    red, blue = root / "first photo.png", root / "second photo.png"
-    for photo, color in ((red, "red"), (blue, "blue")):
-        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color={color}:s=32x24",
-                        "-threads", "1", "-frames:v", "1", photo], check=True)
+    red, blue = root / "first photo.png", root / "second photo.PSD"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=red:s=32x24",
+                    "-threads", "1", "-frames:v", "1", red], check=True)
+    write_psd(blue, 32, 24)
     overrides = {"MPVBUNDLE": "true", "XDG_RUNTIME_DIR": name,
                  "COFFEE_LIBMPV": shim, "COFFEE_TEST_PROVIDER": provider,
                  "COFFEE_TEST_IPC_DIR": str(sockets)}
@@ -134,8 +136,10 @@ with tempfile.TemporaryDirectory(prefix="coffee-open-", dir="/tmp") as name:
             # Opening a photo while the song plays is independent, even
             # when the original photo window is still visible.
             call(blue, finder=mac)
-            newest = wait(lambda: window_for(blue), "Second photo did not open separately")
+            newest = wait(lambda: window_for(blue), "PSD did not open in a separate viewer")
             assert len({key, photo, newest}) == 3
+            wait(lambda: (peers[newest].get("video-params") or {}).get("w") == 32,
+                 "PSD composite did not decode")
             assert main.get("path") == str(song) and not main.get("pause")
             assert filenames(main) == [str(a), str(song)]
 

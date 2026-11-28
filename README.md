@@ -20,15 +20,15 @@
 
 ## Download
 
-**Coffee 1.8** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.8/SHA256SUMS.txt)
+**Coffee 1.9** · [Latest release](https://github.com/arazgray/coffee/releases/latest) · [SHA-256 checksums](https://github.com/arazgray/coffee/releases/download/v1.9/SHA256SUMS.txt)
 
 | OS | Architecture |
 | --- | --- |
-| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-arm64.deb) |
-| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-media-player-1.8.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-media-player-1.8.0-1.aarch64.rpm) |
-| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-linux-aarch64.tar.gz) |
-| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-macos-x86_64.zip) |
-| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.8/coffee-1.8.0-windows-x86_64.zip) |
+| Linux — Ubuntu, Kubuntu, Debian (`.deb`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-amd64.deb) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-arm64.deb) |
+| Linux — Fedora (`.rpm`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-media-player-1.9.0-1.x86_64.rpm) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-media-player-1.9.0-1.aarch64.rpm) |
+| Linux — Arch and other distributions (`.tar.gz`) | [x86-64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-linux-x86_64.tar.gz) · [ARM64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-linux-aarch64.tar.gz) |
+| macOS (`.zip`) | [Apple Silicon (ARM64)](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-macos-arm64.zip) · [Intel (x86-64)](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-macos-x86_64.zip) |
+| Windows (`.zip`) | [x64](https://github.com/arazgray/coffee/releases/download/v1.9/coffee-1.9.0-windows-x86_64.zip) |
 
 ## Install
 
@@ -93,7 +93,9 @@ Coffee uses the demuxers and decoders in its installed libmpv/FFmpeg build. The 
 
 - **JPEG** `.jpg`, `.jpeg`, `.jfif`, `.jpe`; **PNG/APNG** `.png`, `.apng`; **GIF** `.gif`; **WebP** `.webp` (lossy, lossless, transparency, and animation).
 - **AVIF** `.avif`; **HEIC/HEIF** `.heic`, `.heif`, `.heics`, `.heifs`; **JPEG XL** `.jxl`; **JPEG 2000** `.jp2`, `.j2k`, `.j2c`; **QOI** `.qoi`.
-- **TIFF** `.tif`, `.tiff`; **BMP** `.bmp`; **ICO** `.ico`; **Targa** `.tga`; **DDS** `.dds`; **Radiance HDR** `.hdr`; **OpenEXR** `.exr`; **Netpbm** `.pbm`, `.pgm`, `.ppm`, `.pam`.
+- **TIFF** `.tif`, `.tiff` (also `.tff` if it contains TIFF data); **Photoshop** `.psd` (saved composite); **SVG** `.svg` (local static preview); **BMP** `.bmp`; **ICO** `.ico`; **Targa** `.tga`; **DDS** `.dds`; **Radiance HDR** `.hdr`; **OpenEXR** `.exr`; **Netpbm** `.pbm`, `.pgm`, `.ppm`, `.pam`.
+
+Coffee renders local SVGs without an external decoder. Animations, scripts, and externally linked assets are not loaded.
 
 Full-resolution tiled HEIC/HEIF (common on iPhones) uses libheif with an HEVC decoder. The Debian package recommends `libheif-plugin-libde265`; Fedora users may need `libheif-freeworld` from RPM Fusion. Local animated WebP works on older FFmpeg builds too. Experimental WebP v2 is not supported.
 

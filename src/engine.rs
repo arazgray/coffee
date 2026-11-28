@@ -228,6 +228,7 @@ pub struct Engine {
     api: Api,
     handle: Handle,
     image_source: RefCell<Option<tempfile::NamedTempFile>>,
+    image_error: RefCell<Option<String>>,
     cache: Option<crate::preload::Cache>,
     stream_slot: Box<crate::preload::StreamSlot>,
     photo_zoom: Cell<crate::state::PhotoZoom>,
@@ -291,6 +292,7 @@ impl Engine {
             api,
             handle,
             image_source: RefCell::new(None),
+            image_error: RefCell::new(None),
             cache: (!matches!(output, Output::Soundtrack)).then(crate::preload::Cache::new),
             stream_slot: Box::default(),
             photo_zoom: Cell::default(),
@@ -581,10 +583,12 @@ impl Engine {
             6 => Event::Start(unsafe { *event.data.cast::<i64>().as_ref()? }),
             7 => {
                 let end = unsafe { event.data.cast::<EndFile>().as_ref()? };
+                let image_error = self.image_error.take();
                 Event::End {
                     id: end.playlist_entry_id,
                     eof: end.reason == 0,
-                    error: (end.reason == 4).then(|| self.api.error(end.error)),
+                    error: (end.reason == 4)
+                        .then(|| image_error.unwrap_or_else(|| self.api.error(end.error))),
                 }
             }
             8 => Event::Loaded,
@@ -631,6 +635,7 @@ impl Engine {
 
     fn prepare_image_source(&self) {
         self.image_source.replace(None);
+        self.image_error.replace(None);
         self.stream_slot.clear();
         let source = self.get("stream-open-filename");
         let Some(path) = source.as_str() else { return };
@@ -663,6 +668,12 @@ impl Engine {
                 }
             }
             Ok(None) => {}
+            Err(error) if crate::image_source::is_local_svg(path) => {
+                // A failed SVG preview should not fall through to an
+                // optional decoder with different resource rules.
+                let _ = self.set("stream-open-filename", "coffee-ram://unreadable-svg");
+                self.image_error.replace(Some(error));
+            }
             Err(error) => eprintln!("{error}"),
         }
     }

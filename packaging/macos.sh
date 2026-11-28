@@ -40,6 +40,8 @@ cat > "$app/Info.plist" <<EOF
                 <string>public.movie</string>
                 <string>public.video</string>
                 <string>public.image</string>
+                <string>com.adobe.photoshop-image</string>
+                <string>public.svg-image</string>
                 <string>org.matroska.mkv</string>
                 <string>org.webmproject.webm</string>
             </array>
