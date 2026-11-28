@@ -57,6 +57,8 @@ enum Picker {
 enum Input {
     #[cfg(unix)]
     Launch(Vec<String>),
+    #[cfg(target_os = "macos")]
+    MacKey(String, bool),
     Picked(Picker, Option<String>),
     FontsLoaded(fonts::Catalog),
 }
@@ -1250,6 +1252,18 @@ impl App {
     fn receive(&mut self, input: Input) {
         match input {
             Input::FontsLoaded(catalog) => self.fonts = catalog,
+            #[cfg(target_os = "macos")]
+            Input::MacKey(key, repeat) => {
+                if !self.picker
+                    && (!repeat
+                        || matches!(key.as_str(), "LEFT" | "RIGHT" | "UP" | "DOWN")
+                        || ((self.stream.is_some() || self.font_input)
+                            && (matches!(key.as_str(), "BS" | "DEL" | "SPACE")
+                                || key.chars().count() == 1)))
+                {
+                    let _ = self.mpv.command(&["keypress", &key]);
+                }
+            }
             #[cfg(unix)]
             Input::Launch(files) => {
                 let _ = self.mpv.set("window-minimized", "no");
@@ -2247,7 +2261,7 @@ fn smoke(path: &str, cached: bool) -> Result<(), String> {
     Err("Timed out waiting for a decoded video frame or audio output".into())
 }
 
-fn entry() -> Result<(), String> {
+fn entry(tx: Sender<Input>, rx: Receiver<Input>) -> Result<(), String> {
     let mut arguments = env::args_os().skip(1);
     let first = arguments.next();
     if first.as_deref().is_some_and(|x| x == "--smoke-test") {
@@ -2271,12 +2285,18 @@ fn entry() -> Result<(), String> {
         .chain(arguments)
         .filter_map(|x| library::normalize(&x.to_string_lossy()))
         .collect::<Vec<_>>();
-    let (tx, rx) = mpsc::channel();
     let Some(runtime) = runtime(&files, tx.clone())? else {
         return Ok(());
     };
     let input = runtime.dir.join("input.conf");
-    fs::write(&input, include_str!("../assets/input.conf")).map_err(|e| e.to_string())?;
+    let bindings = include_str!("../assets/input.conf");
+    #[cfg(target_os = "macos")]
+    let bindings = [
+        bindings,
+        "Meta+o script-message kahve open-files\nMeta+q quit\n",
+    ]
+    .concat();
+    fs::write(&input, bindings).map_err(|e| e.to_string())?;
     platform::ensure_dark_frame();
     let devices = Devices::discover();
     let mpv = Engine::create(Some(&input), false, devices.renderer.as_deref())?;
@@ -2376,8 +2396,8 @@ fn dialog() -> Command {
     command
 }
 
-fn run_entry() {
-    if let Err(error) = entry() {
+fn run_entry(tx: Sender<Input>, rx: Receiver<Input>) {
+    if let Err(error) = entry(tx, rx) {
         eprintln!("Coffee: {error}");
         if !env::args_os().any(|arg| arg == "--smoke-test" || arg == "--version") {
             platform::error_dialog(&error);
@@ -2387,12 +2407,14 @@ fn run_entry() {
 }
 
 fn main() {
+    let (tx, rx) = mpsc::channel();
     #[cfg(target_os = "macos")]
     if !env::args_os().any(|arg| arg == "--smoke-test" || arg == "--version") {
-        platform::cocoa_loop(run_entry);
+        let keys = tx.clone();
+        platform::cocoa_loop(move || run_entry(tx, rx), keys);
         return;
     }
-    run_entry();
+    run_entry(tx, rx);
 }
 
 #[cfg(test)]

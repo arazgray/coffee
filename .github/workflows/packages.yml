@@ -105,6 +105,14 @@ jobs:
           installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/animated.webp
           output=$(installed/Coffee.app/Contents/MacOS/Coffee --smoke-test --preload tests/fixtures/grid.heic)
           printf '%s\n' "$output" | grep -F '128 × 96'
+      - name: Verify macOS keyboard shortcuts
+        run: |
+          mpv="$(brew --prefix mpv)"
+          probe="$RUNNER_TEMP/coffee-keyboard-probe.dylib"
+          clang -fobjc-arc -dynamiclib -framework AppKit -I"$mpv/include" -L"$mpv/lib" \
+            -lmpv tests/macos-keyboard-probe.m -o "$probe"
+          python3 tests/macos-keyboard.py \
+            "$PWD/installed/Coffee.app/Contents/MacOS/Coffee" "$probe" "$mpv/lib/libmpv.2.dylib"
       - uses: actions/upload-artifact@v6
         with:
           name: macos-${{ matrix.arch }}

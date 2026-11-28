@@ -220,13 +220,73 @@ fn mac_window_size((visible_w, visible_h): (f64, f64), backing_scale: f64) -> (i
     (to_pixels(w), to_pixels(h))
 }
 
+// Cocoa's hardware codes are layout-independent only for navigation keys.
+// Use the event's actual character for printable keys, including non-ASCII text.
+#[cfg(any(target_os = "macos", test))]
+fn mac_key_name(
+    code: u16,
+    chars: &str,
+    shift: bool,
+    control: bool,
+    command: bool,
+) -> Option<String> {
+    let special = match code {
+        36 => "ENTER",
+        48 => "TAB",
+        51 => "BS",
+        53 => "ESC",
+        76 => "KP_ENTER",
+        115 => "HOME",
+        117 => "DEL",
+        119 => "END",
+        123 => "LEFT",
+        124 => "RIGHT",
+        125 => "DOWN",
+        126 => "UP",
+        _ => "",
+    };
+    if control || command {
+        // Leave other system and menu shortcuts to Cocoa.
+        if shift
+            || control && command
+            || !matches!((control, chars), (_, "a" | "o" | "v") | (false, "q"))
+        {
+            return None;
+        }
+        let modifier = if command { "Meta" } else { "Ctrl" };
+        return Some(format!("{modifier}+{chars}"));
+    }
+    if !special.is_empty() {
+        return Some(if shift {
+            format!("Shift+{special}")
+        } else {
+            special.into()
+        });
+    }
+    let mut text = chars.chars();
+    let ch = text.next()?;
+    if text.next().is_some() || ch.is_control() || ('\u{f700}'..='\u{f8ff}').contains(&ch) {
+        return None;
+    }
+    Some(if ch == ' ' {
+        "SPACE".into()
+    } else {
+        ch.to_string()
+    })
+}
+
 #[cfg(target_os = "macos")]
-pub fn cocoa_loop(run: fn()) {
+pub fn cocoa_loop(
+    run: impl FnOnce() + Send + 'static,
+    keys: std::sync::mpsc::Sender<crate::Input>,
+) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
         NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-        NSScreen,
+        NSEvent, NSEventMask, NSEventModifierFlags as Modifiers, NSScreen,
     };
+    use std::ptr::{self, NonNull};
+
     let marker = MainThreadMarker::new().expect("Cocoa must run on the main thread");
     let app = NSApplication::sharedApplication(marker);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -241,11 +301,62 @@ pub fn cocoa_loop(run: fn()) {
             screen.backingScaleFactor(),
         ));
     }
+    // mpv's executable forwards key events in its own NSApplication subclass.
+    // libmpv uses our AppKit loop, so hand player keys to the Rust worker.
+    let keyboard = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
+        let Some(marker) = MainThreadMarker::new() else {
+            return event.as_ptr();
+        };
+        let app = NSApplication::sharedApplication(marker);
+        let key_event = unsafe { event.as_ref() };
+        if !app.isActive() || app.modalWindow().is_some() {
+            return event.as_ptr();
+        }
+        let (Some(window), Some(key_window)) = (key_event.window(marker), app.keyWindow()) else {
+            return event.as_ptr();
+        };
+        if !ptr::eq(&*window, &*key_window) || window.sheetParent().is_some() {
+            return event.as_ptr();
+        }
+        let flags = key_event.modifierFlags();
+        let control = flags.contains(Modifiers::Control);
+        let command = flags.contains(Modifiers::Command);
+        let chars = if command || control {
+            key_event.charactersIgnoringModifiers()
+        } else {
+            key_event.characters()
+        }
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+        let name = mac_key_name(
+            key_event.keyCode(),
+            &chars,
+            flags.contains(Modifiers::Shift),
+            control,
+            command,
+        );
+        if let Some(name) = name
+            && keys
+                .send(crate::Input::MacKey(name, key_event.isARepeat()))
+                .is_ok()
+        {
+            return ptr::null_mut();
+        }
+        event.as_ptr()
+    });
+    // A local monitor runs on the AppKit thread and returns the original
+    // borrowed event or nil; no event reference escapes the callback.
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &keyboard)
+    };
     std::thread::spawn(move || {
         run();
         std::process::exit(0);
     });
     app.run();
+    if let Some(monitor) = monitor {
+        unsafe { NSEvent::removeMonitor(&monitor) };
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +368,26 @@ mod tests {
         assert_eq!(mac_window_size((1440.0, 875.0), 1.0), (1050, 630));
         assert_eq!(mac_window_size((1440.0, 875.0), 2.0), (2100, 1260));
         assert_eq!(mac_window_size((900.0, 520.0), 2.0), (1560, 936));
+    }
+
+    #[test]
+    fn cocoa_key_names_preserve_text_and_reserve_system_combinations() {
+        let key = |code, text, shift, ctrl, cmd| mac_key_name(code, text, shift, ctrl, cmd);
+        assert_eq!(key(49, " ", false, false, false).as_deref(), Some("SPACE"));
+        assert_eq!(
+            key(124, "\u{f703}", false, false, false).as_deref(),
+            Some("RIGHT")
+        );
+        assert_eq!(
+            key(76, "\n", false, false, false).as_deref(),
+            Some("KP_ENTER")
+        );
+        assert_eq!(key(44, "?", true, false, false).as_deref(), Some("?"));
+        assert_eq!(key(31, "ö", false, false, false).as_deref(), Some("ö"));
+        assert_eq!(key(31, "o", false, false, true).as_deref(), Some("Meta+o"));
+        assert_eq!(key(9, "v", false, true, false).as_deref(), Some("Ctrl+v"));
+        assert_eq!(key(46, "m", false, false, true), None);
+        assert_eq!(key(122, "\u{f704}", false, false, false), None);
     }
 }
 

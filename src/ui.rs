@@ -1806,7 +1806,11 @@ fn menu_panel(f: &mut Frame, v: View<'_>, menu: Menu) {
                 "[ / ]  —  Previous or next item",
                 "↑ / ↓  —  Volume",
                 "Enter / F  —  Fullscreen",
-                "O  —  Open files",
+                if cfg!(target_os = "macos") {
+                    "O / Cmd+O  —  Open files"
+                } else {
+                    "O  —  Open files"
+                },
                 "L  —  Playlist",
                 "I  —  Media details",
                 "Esc  —  Close panel or exit fullscreen",
