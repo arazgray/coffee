@@ -1,13 +1,17 @@
 use image_webp::{LoopCount, WebPDecoder};
 use resvg::{tiny_skia, usvg};
+#[cfg(not(target_os = "macos"))]
+use std::sync::{Arc, OnceLock};
 use std::{
     borrow::Cow,
     fs::File,
     io::{BufReader, BufWriter, Read, Seek},
     path::Path,
-    sync::{Arc, OnceLock},
 };
 use tempfile::NamedTempFile;
+
+#[cfg(target_os = "macos")]
+mod mac_fonts;
 
 pub fn prepare_local(path: &Path) -> Result<Option<NamedTempFile>, String> {
     if is_local_svg(path) {
@@ -30,6 +34,7 @@ pub fn is_local_svg(path: &Path) -> bool {
             .is_some_and(|s| s.eq_ignore_ascii_case("svg"))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn svg_fonts() -> Arc<usvg::fontdb::Database> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     Arc::clone(FONTS.get_or_init(|| {
@@ -103,7 +108,10 @@ fn svg_preview(path: &Path) -> Result<NamedTempFile, String> {
     let embedded = usvg::ImageHrefResolver::default_data_resolver();
     let options = usvg::Options {
         font_family: "serif".into(),
+        #[cfg(not(target_os = "macos"))]
         fontdb: svg_fonts(),
+        #[cfg(target_os = "macos")]
+        font_resolver: mac_fonts::resolver(),
         image_href_resolver: usvg::ImageHrefResolver {
             // Don't let the document read other files, or fetch them over the network.
             resolve_string: Box::new(|_, _| None),
@@ -324,5 +332,25 @@ mod tests {
         let mut pixels = [0; 8];
         png.next_frame(&mut pixels).unwrap();
         assert_eq!(pixels, [0, 0, 0, 0, 0, 0, 255, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn svg_renders_text_using_a_native_font() {
+        let dir = tempfile::tempdir().unwrap();
+        let svg = dir.path().join("text.svg");
+        std::fs::write(
+            &svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
+                <text x="1" y="24" font-family="sans-serif" font-weight="bold" font-size="18">Coffee</text>
+            </svg>"#,
+        ).unwrap();
+        let output = prepare_local(&svg).unwrap().unwrap();
+        let mut png = png::Decoder::new(BufReader::new(File::open(output.path()).unwrap()))
+            .read_info()
+            .unwrap();
+        let mut pixels = vec![0; png.output_buffer_size().unwrap()];
+        png.next_frame(&mut pixels).unwrap();
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 }
